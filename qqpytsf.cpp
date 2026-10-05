@@ -22,8 +22,8 @@
 #include <objbase.h>
 #include <msctf.h>
 #include <atlbase.h>
-#include <atlcom.h>
 #include <stdarg.h>
+#include <new>
 #include <string>
 #include "qqpyutil.h"
 
@@ -75,12 +75,42 @@ void L(const char* s)
 }
 
 // 只读编辑会话：在 TSF 给的 edit cookie 下问宿主"光标在哪一格"
-class CExtentSession : public CComObjectRootEx<CComSingleThreadModel>, public ITfEditSession
+//
+// 这里【故意】手写 IUnknown，而不用 ATL 的 CComObject<>::CreateInstance()。
+// 原因：CreateInstance 内部会调用 _pAtlModule->Lock()，而 _pAtlModule 默认为 NULL
+// (atlbase.h:2979)，只有构造过 CAtlModule 派生对象才会被赋值 (atlbase.h:3044)。
+// 本 DLL 不是 ATL 模块（没有 CAtlDllModuleT），_pAtlModule 恒为 NULL —— 实测会在
+// CreateInstance+0x56 处执行 `mov rax,[rcx]`（rcx=NULL）触发 0xC0000005，
+// 使宿主 WindowsTerminal.exe 启动即崩溃。手写实现后完全不碰 ATL 的对象机制；
+// 接口【指针】仍由 ATL 智能指针管理（见 TsfRequest 里的 CComQIPtr）。
+//
+// 引用计数从 0 开始（与 ATL CreateInstance 的约定一致），由首个 AddRef 者接管。
+class CExtentSession : public ITfEditSession
 {
 public:
-    BEGIN_COM_MAP(CExtentSession)
-    COM_INTERFACE_ENTRY(ITfEditSession)
-    END_COM_MAP()
+    CExtentSession() noexcept : m_ref(0) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession))
+        {
+            *ppv = static_cast<ITfEditSession*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_ref)); }
+
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const LONG n = InterlockedDecrement(&m_ref);
+        if (n == 0) delete this;  // this 是具体类型 CExtentSession，删除正确
+        return static_cast<ULONG>(n);
+    }
 
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie ec) override
     {
@@ -128,6 +158,9 @@ public:
         }
         return S_OK;
     }
+
+private:
+    volatile LONG m_ref;
 };
 
 void TsfRequest()
@@ -144,12 +177,9 @@ void TsfRequest()
     CComPtr<ITfContext> pic;
     if (FAILED(pdim->GetTop(&pic)) || !pic) return;
 
-    CComObject<CExtentSession>* raw = nullptr;
-    if (FAILED(CComObject<CExtentSession>::CreateInstance(&raw)) || !raw) return;
-
-    // CreateInstance 出来的对象引用计数为 0；下面的智能指针会 QI 并 AddRef。
-    // COM_MAP 里声明了 ITfEditSession，QI 必然成功。
-    CComQIPtr<ITfEditSession> session(raw);
+    // 引用计数从 0 开始：CComQIPtr 构造会 QI 并 AddRef，作用域结束自动 Release；
+    // msctf 在排队执行该会话期间也会自己 AddRef/Release。
+    CComQIPtr<ITfEditSession> session(new (std::nothrow) CExtentSession());
     if (!session) return;
 
     HRESULT       phr  = S_OK;

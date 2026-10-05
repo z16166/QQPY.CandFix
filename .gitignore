@@ -25,3 +25,5 @@ build/
 # ---- OS junk ----
 Thumbs.db
 desktop.ini
+*.map
+*.exe

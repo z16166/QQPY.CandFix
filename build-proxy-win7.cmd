@@ -71,7 +71,7 @@ cl /nologo /utf-8 /LD /MT /std:c++17 /O2 /EHsc /W3 ^
    /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 ^
    /I"!ATLROOT!\include" ^
    qqpyproxy.cpp qqpytsf.cpp qqpyutil.cpp ^
-   /Fe:qqpyproxy.dll /link /OUT:qqpyproxy.dll /SUBSYSTEM:WINDOWS,6.01 /DYNAMICBASE /NXCOMPAT ^
+   /Fe:qqpyproxy.dll /link /OUT:qqpyproxy.dll /MAP /SUBSYSTEM:WINDOWS,6.01 /DYNAMICBASE /NXCOMPAT ^
    /LIBPATH:"!ATLROOT!\lib\x64" ^
    user32.lib shell32.lib ole32.lib uuid.lib
 

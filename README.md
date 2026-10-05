@@ -239,7 +239,43 @@ ini **每 1.5 秒重读一次**，改了不用重装、不用重启 WT（`real`/
 
 ---
 
-## 七、注意事项
+## 七、不要改回 CComObject（一次真实事故的记录）
+
+`CExtentSession`（只读编辑会话）**刻意手写 IUnknown**，不是偷懒 —— 用 ATL 的
+`CComObject<T>::CreateInstance()` 会让宿主启动即崩溃。
+
+原因：`CreateInstance` 内部会调用 `_pAtlModule->Lock()`，而 `_pAtlModule` 默认是 NULL
+（`atlbase.h:2979`），只有构造过 `CAtlModule` 派生对象才会被赋值（`atlbase.h:3044`）。
+本 DLL 不是 ATL 模块（没有 `CAtlDllModuleT`），所以它**恒为 NULL**。
+（另注：`CAtlModule` 本身是抽象类，想"随手加个模块对象"也编不过。）
+
+**事故现场**（Windows Terminal 1.24 + 本代理）：
+
+```
+Application Error: WindowsTerminal.exe 1.24.2607.10001
+  出错模块：qqpyproxy.dll      异常代码：0xC0000005
+  错误偏移：0x0000000000003dd6
+```
+
+反汇编 `qqpyproxy+0x3DD6` 正好落在 `ATL::CComObject<CExtentSession>::CreateInstance+0x56`：
+
+```asm
+mov rcx, cs:_pAtlModule     ; rcx = NULL
+mov rax, [rcx]              ; ★ 空指针解引用
+call qword ptr [rax+8]      ; -> _pAtlModule->Lock()
+```
+
+**隔离实验**（同一段 ATL 代码，一个 EXE 两种构建）：
+
+| 构建 | 结果 |
+|---|---|
+| 不提供 ATL 模块对象 | 退出码 **0xC0000005**（复现） |
+| 提供 ATL 模块对象 | 正常 |
+
+**修法**：改成手写 IUnknown（引用计数从 0 开始，由 `CComQIPtr` 的 QI/AddRef 接管），
+整套 ATL 对象机制不再参与 —— 新构建里 `CComObject` / `CComObjectRootEx` / `_pAtlModule`
+符号数均为 **0**；接口**指针**仍然全部由 `CComPtr` / `CComQIPtr` 管理。
+## 八、注意事项
 
 - **QQ拼音升级 / 修复安装 / 重新注册 TIP 会把注册表改回去** → 重跑一次安装脚本即可。
 - 32 位宿主不受影响（只改了 64 位视图）。
