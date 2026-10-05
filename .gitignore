@@ -1,0 +1,27 @@
+# ---- build outputs (never commit) ----
+*.dll
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.res
+*.manifest
+
+# ---- IDA databases ----
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# ---- logs / scratch ----
+*.log
+_*.log
+build/
+
+# ---- OS junk ----
+Thumbs.db
+desktop.ini

@@ -1,0 +1,7 @@
+# Windows batch / PowerShell scripts must check out with CRLF
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+*.cpp  text
+*.md   text
+.gitignore text
