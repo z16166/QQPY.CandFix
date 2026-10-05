@@ -17,6 +17,16 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
 
+// ------------------------------------------------------------------ 常量
+constexpr const wchar_t* kSubDirName         = L"QQPYCandFix";                          // 退路目录名
+constexpr const wchar_t* kIniFileName        = L"qqpyproxy.ini";
+constexpr const wchar_t* kLogFileName        = L"qqpyproxy.log";
+constexpr const wchar_t* kImeRelativePath    = L"\\IME\\QQPinyinTSF\\QQPinyinTSF.dll";  // 相对 GetSystemDirectoryW()
+constexpr const wchar_t* kSystem32Relative   = L"\\system32";                            // 仅当 GetSystemDirectoryW 失败时用
+constexpr const wchar_t* kEnvProgramData     = L"ProgramData";
+constexpr const wchar_t* kEnvAllUsersProfile = L"ALLUSERSPROFILE";
+constexpr const wchar_t* kEnvSystemRoot      = L"SystemRoot";
+
 namespace {
 
 // 取本 DLL 的模块句柄：用本文件里的函数地址反查，永远正确，无需全局变量
@@ -75,14 +85,14 @@ std::wstring ConfigDir()
     if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &programData)) && programData)
     {
         ATL::CComHeapPtr<WCHAR> hold(programData);   // 析构即 CoTaskMemFree
-        return std::wstring(programData) + L"\\QQPYCandFix";
+        return std::wstring(programData) + L"\\" + kSubDirName;
     }
 
     // 3) 环境变量
-    if (std::wstring dir = EnvDir(L"ProgramData"); !dir.empty())
-        return dir + L"\\QQPYCandFix";
-    if (std::wstring dir = EnvDir(L"ALLUSERSPROFILE"); !dir.empty())
-        return dir + L"\\QQPYCandFix";
+    if (std::wstring dir = EnvDir(kEnvProgramData); !dir.empty())
+        return dir + L"\\" + kSubDirName;
+    if (std::wstring dir = EnvDir(kEnvAllUsersProfile); !dir.empty())
+        return dir + L"\\" + kSubDirName;
 
     return std::wstring();
 }
@@ -90,13 +100,13 @@ std::wstring ConfigDir()
 std::wstring IniPath()
 {
     const std::wstring dir = ConfigDir();
-    return dir.empty() ? std::wstring() : dir + L"\\qqpyproxy.ini";
+    return dir.empty() ? std::wstring() : dir + L"\\" + kIniFileName;
 }
 
 std::wstring LogPath()
 {
     const std::wstring dir = ConfigDir();
-    return dir.empty() ? std::wstring() : dir + L"\\qqpyproxy.log";
+    return dir.empty() ? std::wstring() : dir + L"\\" + kLogFileName;
 }
 
 std::wstring DefaultRealDllPath()
@@ -111,13 +121,13 @@ std::wstring DefaultRealDllPath()
     else
     {
         // 退路：环境变量拼 system32
-        const std::wstring root = EnvDir(L"SystemRoot");
+        const std::wstring root = EnvDir(kEnvSystemRoot);
         if (root.empty())
             return std::wstring();
-        dir = root + L"\\system32";
+        dir = root + kSystem32Relative;
     }
     TrimTrailingSeparators(dir);
-    return dir + L"\\IME\\QQPinyinTSF\\QQPinyinTSF.dll";
+    return dir + kImeRelativePath;
 }
 
 } // namespace qqpy

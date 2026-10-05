@@ -130,6 +130,10 @@ ShowWindow(QQPinyinCompWndTSF, cmd=4) from QQPinyin.ime+1022AE  <- 引擎显示�
   | ini / log 目录 | 优先 DLL 所在目录；退回 `SHGetKnownFolderPath(FOLDERID_ProgramData)`；再退回环境变量 `ProgramData` / `ALLUSERSPROFILE` |
   | 真身 `QQPinyinTSF.dll` | `GetSystemDirectoryW()` + `\IME\QQPinyinTSF\QQPinyinTSF.dll`（32 位进程得到 SysWOW64，正好对应 32 位 IME）；可用 ini 的 `real=` 覆盖 |
 
+- **不写裸数字**：每个编译单元顶部都有一块"常量"，模式取值用 `enum CaretMode`，
+  尺寸/时限/上限全部命名（`kFakeCaretHeight`、`kIniReloadIntervalMs`、`kExtentMaxAgeMs` …）；
+  外壳补丁的地址与字节也不是硬写的 —— `kCandFilterPatch` 由 `kCandFilterFilterRva`
+  与 `kCandFilterReturnZeroRva` 算出来，`kCandFilterOriginal` 是打补丁前的校验字节。
 - 编译单元为什么要分开：`qqpyproxy.cpp` 定义了 `DllGetClassObject` 等导出，而 `combaseapi.h`
   （经 `<objbase.h>` / ATL 引入）也声明了它们，同一编译单元会 **C2375 redefinition, different linkage**。
   所以导出所在的文件保持"干净"（只引 `windows.h`），COM/ATL 代码放在 `qqpytsf.cpp` / `qqpyutil.cpp`。

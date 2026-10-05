@@ -38,12 +38,75 @@ typedef BOOL (WINAPI *PFN_GGTI)(DWORD, PGUITHREADINFO);
 
 namespace {
 
+// ------------------------------------------------------------------ 常量
+// 插入符模式（对应 ini 的 mode=）
+enum CaretMode : LONG
+{
+    kModePassThrough = 0,   // 只挂钩、不改动（诊断用）
+    kModeFakeCaret   = 1,   // 修复：宿主没有 Win32 插入符时补一个
+    kModeKillCaret   = 2,   // 反向验证：强行抹掉宿主的插入符
+};
+
+constexpr LONG  kCaretModeMin = kModePassThrough;
+constexpr LONG  kCaretModeMax = kModeKillCaret;
+
+// 拿不到 TSF 光标时的回退定位（ini 的 dx= / dy=）
+constexpr LONG  kDefaultFallbackDx = 8;
+constexpr LONG  kDefaultFallbackDy = 8;
+constexpr LONG  kFallbackDxMin = -500;
+constexpr LONG  kFallbackDxMax = 4000;
+constexpr LONG  kFallbackDyMin = 0;
+constexpr LONG  kFallbackDyMax = 4000;
+
+// 假插入符自身尺寸与留边（进程坐标）
+constexpr int   kFakeCaretWidth       = 2;
+constexpr int   kFakeCaretHeight      = 20;
+constexpr int   kMinCaretHeight       = 2;    // 低于此高度就不做半格下移
+constexpr int   kWorkAreaMargin       = 2;    // 不贴死工作区边缘
+constexpr int   kFallbackMarginRight  = 6;
+constexpr int   kFallbackMarginBottom = 24;
+constexpr int   kMinAnchorSize        = 60;   // 太小的窗口不作为锚点
+
+// 候选框垂直位置：引擎把框的顶边放在插入符矩形的垂直中心，
+// 所以整体下移半格（h / kShiftHalfCell）；判断"下方是否放得下"时
+// 预留 kRoomBelowCells 格作为候选框高度。
+constexpr int   kShiftHalfCell  = 2;
+constexpr int   kRoomBelowCells = 3;
+
+// 日志与配置
+constexpr LONG  kLogMaxLines          = 600;   // 日志行数上限
+constexpr DWORD kIniReloadIntervalMs  = 1500;  // ini 热重载间隔（dx/dy/log 可热改）
+constexpr size_t kIniMaxBytes         = 2048;
+constexpr size_t kLogLineMax          = 900;
+constexpr size_t kCallerTagMax        = 128;
+constexpr size_t kClassNameMax        = 80;
+constexpr size_t kIniSeparatorLen     = 1;     // ini 里 "key=value" 的 '=' 占一个字符
+constexpr int   kFirstNHookLogs       = 6;     // 前 N 次钩子调用写日志
+constexpr int   kFirstNFullLogs       = 8;     // 前 N 次写完整坐标
+
+// 外壳 QQPinyinTSF.dll!sub_18000AF70 的候选窗消息过滤器（详见 PatchCandFilter）
+constexpr DWORD kCandFilterFilterRva     = 0xAFBD;  // test byte ptr [rbx+3B9Ch],40h 所在 RVA
+constexpr DWORD kCandFilterReturnZeroRva = 0xAFDA;  // 同函数里 xor eax,eax ; add rsp,20h ; pop rbx ; retn
+constexpr size_t kCandFilterPatchSize    = 2;       // jmp rel8 的长度
+constexpr BYTE  kOpcodeJmpShort          = 0xEB;
+// 直接跳到"返回 0"，跳过"返回 1"（即不拦候选窗消息）
+constexpr BYTE  kCandFilterPatch[kCandFilterPatchSize] =
+{
+    kOpcodeJmpShort,
+    (BYTE)(kCandFilterReturnZeroRva - kCandFilterFilterRva - kCandFilterPatchSize)
+};
+// 打补丁前必须匹配的原始字节，防止版本不符时改错地方
+constexpr BYTE  kCandFilterOriginal[7] = { 0xF6, 0x83, 0x9C, 0x3B, 0x00, 0x00, 0x40 };
+
+// 等引擎 QQPinyin.ime 被外壳加载出来的节奏
+constexpr int   kEngineWaitIterations = 3600;   // 3600 * 500ms = 30 分钟
+constexpr DWORD kEngineWaitIntervalMs = 500;
 // ------------------------------------------------------------------ 状态
 HMODULE       g_real = nullptr;
 PFN_GGTI      g_realGGTI = nullptr;
-volatile LONG g_mode = 1;
-volatile LONG g_dx = 8;      // 回退定位：假插入符距客户区左边界的偏移
-volatile LONG g_dy = 8;      // 回退定位：假插入符底边距客户区下边界的距离
+volatile LONG g_mode = kModeFakeCaret;
+volatile LONG g_dx = kDefaultFallbackDx;  // 回退定位：假插入符距客户区左边界的偏移
+volatile LONG g_dy = kDefaultFallbackDy;  // 回退定位：假插入符底边距客户区下边界的距离
 volatile LONG g_logOn = 0;
 volatile LONG g_logCount = 0;
 volatile LONG g_hookCount = 0;
@@ -71,13 +134,13 @@ void LogFileEnsure()
 void Log(const char* fmt, ...)
 {
     if (!g_logOn) return;
-    if (InterlockedIncrement(&g_logCount) > 600) return;
+    if (InterlockedIncrement(&g_logCount) > kLogMaxLines) return;
 
     qqpy::CsLock lock(g_logLock);
     LogFileEnsure();
     if (!g_logFile.valid()) return;
 
-    char buf[900];
+    char buf[kLogLineMax];
     SYSTEMTIME st;
     ::GetLocalTime(&st);
     int n = wsprintfA(buf, "[%02d:%02d:%02d.%03d pid=%lu] ", st.wHour, st.wMinute, st.wSecond,
@@ -133,7 +196,7 @@ bool IniGetInt(const std::string& text, const char* key, int& out)
 {
     const size_t pos = FindKey(text, key);
     if (pos == std::string::npos) return false;
-    out = atoi(text.c_str() + pos + strlen(key) + 1);
+    out = atoi(text.c_str() + pos + strlen(key) + kIniSeparatorLen);
     return true;
 }
 
@@ -141,7 +204,7 @@ std::string IniGetStr(const std::string& text, const char* key)
 {
     const size_t pos = FindKey(text, key);
     if (pos == std::string::npos) return std::string();
-    size_t begin = pos + strlen(key) + 1;
+    size_t begin = pos + strlen(key) + kIniSeparatorLen;
     size_t end = text.find_first_of("\r\n", begin);
     if (end == std::string::npos) end = text.size();
     return text.substr(begin, end - begin);
@@ -156,7 +219,7 @@ std::string IniText()   // 读 ini 全文（文件句柄 RAII）
                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!h.valid()) return std::string();
 
-    char buf[2048] = {};
+    char buf[kIniMaxBytes] = {};
     DWORD rd = 0;
     if (!::ReadFile(h.get(), buf, sizeof(buf) - 1, &rd, nullptr)) return std::string();
     return std::string(buf, rd);
@@ -180,17 +243,17 @@ void ReloadIni(bool firstTime)
     {
         const DWORD now = ::GetTickCount();
         const LONG prev = last;
-        if (now - (DWORD)prev < 1500) return;                    // 1.5 秒内不重复读
+        if (now - (DWORD)prev < kIniReloadIntervalMs) return;                    // 1.5 秒内不重复读
         if (InterlockedCompareExchange(&last, (LONG)now, prev) != prev) return;
     }
 
     const std::string text = IniText();
     int v = 0;
 
-    if (IniGetInt(text, "mode", v) && v >= 0 && v <= 2) InterlockedExchange(&g_mode, v);
-    if (IniGetInt(text, "dx", v) && v >= -500 && v <= 4000) InterlockedExchange(&g_dx, v);
-    if (IniGetInt(text, "dy", v) && v >= 0 && v <= 4000) InterlockedExchange(&g_dy, v);
-    if (IniGetInt(text, "log", v)) InterlockedExchange(&g_logOn, v ? 1 : 0);
+    if (IniGetInt(text, "mode", v) && v >= kCaretModeMin && v <= kCaretModeMax) InterlockedExchange(&g_mode, v);
+    if (IniGetInt(text, "dx", v) && v >= kFallbackDxMin && v <= kFallbackDxMax) InterlockedExchange(&g_dx, v);
+    if (IniGetInt(text, "dy", v) && v >= kFallbackDyMin && v <= kFallbackDyMax) InterlockedExchange(&g_dy, v);
+    if (IniGetInt(text, "log", v)) InterlockedExchange(&g_logOn, (v != 0) ? 1 : 0);
 
     if (firstTime)
     {
@@ -255,13 +318,13 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
 
     const BOOL ok = real(idThread, pgui);
     const LONG mode = g_mode;
-    if (!pgui || mode == 0) return ok;
+    if (!pgui || mode == kModePassThrough) return ok;
 
     const LONG nth = InterlockedIncrement(&g_hookCount);
 
-    if (mode == 2)
+    if (mode == kModeKillCaret)
     {
-        if (nth <= 6) Log("hook#%ld mode2: force hwndCaret=NULL (was %p)", nth, pgui->hwndCaret);
+        if (nth <= kFirstNHookLogs) Log("hook#%ld mode2: force hwndCaret=NULL (was %p)", nth, pgui->hwndCaret);
         pgui->hwndCaret = nullptr;
         pgui->rcCaret.left = pgui->rcCaret.top = pgui->rcCaret.right = pgui->rcCaret.bottom = 0;
         return ok;
@@ -269,7 +332,7 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
 
     if (pgui->hwndCaret)
     {
-        if (nth <= 6) Log("hook#%ld mode1: host has caret %p -> pass through", nth, pgui->hwndCaret);
+        if (nth <= kFirstNHookLogs) Log("hook#%ld mode1: host has caret %p -> pass through", nth, pgui->hwndCaret);
         return ok;
     }
 
@@ -278,14 +341,14 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
     if (!anchor || !::IsWindow(anchor)) anchor = pgui->hwndActive;
     if (!anchor || !::IsWindow(anchor))
     {
-        if (nth <= 6) Log("hook#%ld mode1: no anchor (fg/focus/active all null)", nth);
+        if (nth <= kFirstNHookLogs) Log("hook#%ld mode1: no anchor (fg/focus/active all null)", nth);
         return ok;
     }
 
     RECT wr = {};
     if (!::GetWindowRect(anchor, &wr))
     {
-        if (nth <= 6) Log("hook#%ld GetWindowRect failed", nth);
+        if (nth <= kFirstNHookLogs) Log("hook#%ld GetWindowRect failed", nth);
         return ok;
     }
 
@@ -300,12 +363,13 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
             bool shift = false;
             POINT org = {};
             RECT  crc = {};
-            if (h > 2 && ::ClientToScreen(anchor, &org) && ::GetClientRect(anchor, &crc))
-                shift = (rc.bottom + h / 2 + 3 * h) < (org.y + crc.bottom);
+            const int halfCell = h / kShiftHalfCell;
+            if (h > kMinCaretHeight && ::ClientToScreen(anchor, &org) && ::GetClientRect(anchor, &crc))
+                shift = (rc.bottom + halfCell + kRoomBelowCells * h) < (org.y + crc.bottom);
             if (shift)
             {
-                rc.top += h / 2;
-                rc.bottom += h / 2;
+                rc.top += halfCell;
+                rc.bottom += halfCell;
             }
 
             pgui->hwndCaret = anchor;
@@ -314,9 +378,9 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
             pgui->rcCaret.right = rc.right - wr.left;
             pgui->rcCaret.bottom = rc.bottom - wr.top;
 
-            if (nth <= 8)
+            if (nth <= kFirstNFullLogs)
             {
-                char who[128];
+                char who[kCallerTagMax];
                 CallerTagOf(_ReturnAddress(), who, sizeof(who));
                 Log("hook#%ld [%s] TSF-CARET screen=(%d,%d-%d,%d) h=%d shift=%d",
                     nth, who, rc.left, rc.top, rc.right, rc.bottom, h, (int)shift);
@@ -329,36 +393,36 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
     RECT cr = {};
     POINT cli = {};
     if (!::GetClientRect(anchor, &cr)) return ok;
-    if ((wr.bottom - wr.top) < 60 || (cr.bottom - cr.top) < 60) return ok;
+    if ((wr.bottom - wr.top) < kMinAnchorSize || (cr.bottom - cr.top) < kMinAnchorSize) return ok;
     if (!::ClientToScreen(anchor, &cli)) return ok;
 
     ReloadIni(false);                                   // 允许热改 dx/dy
     const int dx = g_dx, dy = g_dy;
     int sx = cli.x + dx;
-    int sy = cli.y + (cr.bottom - cr.top) - dy - 20;    // 20 = 假插入符自身高度
+    int sy = cli.y + (cr.bottom - cr.top) - dy - kFakeCaretHeight;
 
     MONITORINFO mi = {};
     mi.cbSize = sizeof(mi);
     HMONITOR mon = ::MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
     if (mon && ::GetMonitorInfoW(mon, &mi))
     {
-        if (sx < mi.rcWork.left + 2) sx = mi.rcWork.left + 2;
-        if (sx > mi.rcWork.right - 6) sx = mi.rcWork.right - 6;
-        if (sy < mi.rcWork.top + 2) sy = mi.rcWork.top + 2;
-        if (sy > mi.rcWork.bottom - 24) sy = mi.rcWork.bottom - 24;
+        if (sx < mi.rcWork.left + kWorkAreaMargin) sx = mi.rcWork.left + kWorkAreaMargin;
+        if (sx > mi.rcWork.right - kFallbackMarginRight) sx = mi.rcWork.right - kFallbackMarginRight;
+        if (sy < mi.rcWork.top + kWorkAreaMargin) sy = mi.rcWork.top + kWorkAreaMargin;
+        if (sy > mi.rcWork.bottom - kFallbackMarginBottom) sy = mi.rcWork.bottom - kFallbackMarginBottom;
     }
 
     pgui->hwndCaret = anchor;
     pgui->rcCaret.left = sx - wr.left;
-    pgui->rcCaret.right = pgui->rcCaret.left + 2;
+    pgui->rcCaret.right = pgui->rcCaret.left + kFakeCaretWidth;
     pgui->rcCaret.top = sy - wr.top;
-    pgui->rcCaret.bottom = pgui->rcCaret.top + 20;
+    pgui->rcCaret.bottom = pgui->rcCaret.top + kFakeCaretHeight;
 
-    if (nth <= 8)
+    if (nth <= kFirstNFullLogs)
     {
-        char cls[64] = {};
+        char cls[kClassNameMax] = {};
         ::GetClassNameA(anchor, cls, sizeof(cls) - 1);
-        char who[128];
+        char who[kCallerTagMax];
         CallerTagOf(_ReturnAddress(), who, sizeof(who));
         Log("hook#%ld [%s] FAKE anchor=%p(%s) win=(%d,%d %dx%d) work=(%d,%d-%d,%d) screen=(%d,%d) rc=(%d,%d,%d,%d)",
             nth, who, anchor, cls, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
@@ -389,8 +453,8 @@ BOOL WINAPI Hook_ShowWindow(HWND h, int cmd)
 {
     if (g_logOn)
     {
-        char who[128]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[80];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
         Log("ShowWindow(%p [%s], cmd=%d) from %s", h, cls, cmd, who);
     }
     return g_realShowWindow ? g_realShowWindow(h, cmd) : FALSE;
@@ -400,8 +464,8 @@ BOOL WINAPI Hook_SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, 
 {
     if (g_logOn)
     {
-        char who[128]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[80];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
         Log("SetWindowPos(%p [%s], %d,%d %dx%d, flags=0x%X) from %s", h, cls, x, y, cx, cy, flags, who);
     }
     return g_realSetWindowPos ? g_realSetWindowPos(h, after, x, y, cx, cy, flags) : FALSE;
@@ -409,10 +473,10 @@ BOOL WINAPI Hook_SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, 
 
 LRESULT WINAPI Hook_SendMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
-    if (m == 0x282 && g_logOn)
+    if (m == WM_IME_NOTIFY && g_logOn)
     {
-        char who[128]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[80];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
         Log("SendMessage(%p [%s], WM_IME_NOTIFY, wp=%u) from %s", h, cls, (unsigned)wp, who);
     }
     return g_realSendMessageW ? g_realSendMessageW(h, m, wp, lp) : 0;
@@ -420,10 +484,10 @@ LRESULT WINAPI Hook_SendMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 
 BOOL WINAPI Hook_PostMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
-    if (m == 0x282 && g_logOn)
+    if (m == WM_IME_NOTIFY && g_logOn)
     {
-        char who[128]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[80];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
         Log("PostMessage(%p [%s], WM_IME_NOTIFY, wp=%u) from %s", h, cls, (unsigned)wp, who);
     }
     return g_realPostMessageW ? g_realPostMessageW(h, m, wp, lp) : FALSE;
@@ -498,31 +562,34 @@ void PatchCandFilter()
     HMODULE m = ::GetModuleHandleW(L"QQPinyinTSF.dll");
     if (!m) { Log("PatchCandFilter: shell not loaded"); return; }
 
-    BYTE* p = (BYTE*)m + 0xAFBD;
-    if (p[0] != 0xF6 || p[1] != 0x83 || p[2] != 0x9C || p[3] != 0x3B ||
-        p[4] != 0x00 || p[5] != 0x00 || p[6] != 0x40)
+    BYTE* p = (BYTE*)m + kCandFilterFilterRva;
+
+    // 版本不符时宁可不动，也不要改错地方
+    for (size_t i = 0; i < sizeof(kCandFilterOriginal); ++i)
     {
-        Log("PatchCandFilter: UNEXPECTED %02X %02X %02X %02X %02X %02X %02X",
-            p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
+        if (p[i] == kCandFilterOriginal[i]) continue;
+        Log("PatchCandFilter: byte %zu is %02X, expected %02X - NOT patched",
+            i, p[i], kCandFilterOriginal[i]);
         return;
     }
 
     DWORD old = 0;
-    if (!::VirtualProtect(p, 2, PAGE_EXECUTE_READWRITE, &old))
+    if (!::VirtualProtect(p, kCandFilterPatchSize, PAGE_EXECUTE_READWRITE, &old))
     {
         Log("PatchCandFilter: VirtualProtect failed %lu", ::GetLastError());
         return;
     }
-    p[0] = 0xEB;
-    p[1] = 0x1B;
-    ::VirtualProtect(p, 2, old, &old);
-    ::FlushInstructionCache(::GetCurrentProcess(), p, 2);
-    Log("PatchCandFilter: APPLIED at %p (EB 1B)", p);
+    for (size_t i = 0; i < kCandFilterPatchSize; ++i)
+        p[i] = kCandFilterPatch[i];
+    ::VirtualProtect(p, kCandFilterPatchSize, old, &old);
+    ::FlushInstructionCache(::GetCurrentProcess(), p, kCandFilterPatchSize);
+    Log("PatchCandFilter: APPLIED at %p -> %02X %02X (jump to return-zero)",
+        p, kCandFilterPatch[0], kCandFilterPatch[1]);
 }
 
 DWORD WINAPI EngineWatcher(LPVOID)
 {
-    for (int i = 0; i < 3600; ++i)   // 引擎是外壳稍后 LoadLibraryW 进来的，等它出现
+    for (int i = 0; i < kEngineWaitIterations; ++i)   // 引擎是外壳稍后 LoadLibraryW 进来的，等它出现
     {
         if (::GetModuleHandleW(L"QQPinyin.ime"))
         {
@@ -533,7 +600,7 @@ DWORD WINAPI EngineWatcher(LPVOID)
             PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "SetWindowPos", (void*)&Hook_SetWindowPos);
             break;
         }
-        ::Sleep(500);
+        ::Sleep(kEngineWaitIntervalMs);
     }
     return 0;
 }
@@ -589,7 +656,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rc
 {
     typedef HRESULT(__stdcall * PFN)(REFCLSID, REFIID, void**);
     PFN f = (PFN)RealProc("DllGetClassObject");
-    return f ? f(rclsid, riid, ppv) : (HRESULT)0x80040111L;   // CLASS_E_CLASSNOTAVAILABLE
+    return f ? f(rclsid, riid, ppv) : (HRESULT)CLASS_E_CLASSNOTAVAILABLE;
 }
 
 extern "C" __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow()

@@ -34,6 +34,16 @@
 using ATL::CComPtr;
 using ATL::CComQIPtr;
 
+// ------------------------------------------------------------------ 常量
+constexpr DWORD  kExtentRequestMinIntervalMs = 80;    // 异步会话请求限流
+constexpr UINT   kExtentRefreshIntervalMs    = 100;   // 定时器刷新间隔
+constexpr DWORD  kExtentMaxAgeMs             = 3000;  // 光标矩形的新鲜度上限
+constexpr LONG   kFirstNSessionLogs          = 6;     // 前 N 次会话写日志
+constexpr LONG   kLogEveryNSessions          = 500;   // 之后每 N 次写一条
+constexpr LONG   kFirstNRequestLogs          = 6;     // 前 N 次请求写日志
+constexpr size_t kLogLineMax                 = 512;
+constexpr ULONG  kSelectionCount             = 1;     // 只要"当前选区"这一项
+
 namespace {
 
 CComPtr<ITfThreadMgr> g_ptm;          // 本线程的 TSF 线程管理器（RAII）
@@ -50,7 +60,7 @@ qqpy::UniqueTimer g_timer;            // 定时器（RAII）
 void Lf(const char* fmt, ...)
 {
     if (!g_log) return;
-    char buf[512];
+    char buf[kLogLineMax];
     va_list ap; va_start(ap, fmt);
     wvsprintfA(buf, fmt, ap);
     va_end(ap);
@@ -100,7 +110,7 @@ public:
             }
         }
 
-        if (n <= 6 || (n % 500) == 0)
+        if (n <= kFirstNSessionLogs || (n % kLogEveryNSessions) == 0)
             Lf("TsfSession#%ld GetFocus=%08X GetTop=%08X GetView=%08X GetRange=%08X GetTextExt=%08X rc=(%d,%d-%d,%d) clipped=%d",
                n, (unsigned)h1, (unsigned)h2, (unsigned)h3, (unsigned)h5, (unsigned)h4,
                rc.left, rc.top, rc.right, rc.bottom, (int)clipped);
@@ -120,7 +130,7 @@ void TsfRequest()
     if (!g_ptm) return;
     const DWORD now = GetTickCount();
     LONG prev = g_lastReq;
-    if (now - (DWORD)prev < 80) return;                       // 限流
+    if (now - (DWORD)prev < kExtentRequestMinIntervalMs) return;   // 限流
     if (InterlockedCompareExchange(&g_lastReq, (LONG)now, prev) != prev) return;
 
     CComPtr<ITfDocumentMgr> pdim;
@@ -140,7 +150,7 @@ void TsfRequest()
     HRESULT phr = S_OK;
     const HRESULT hreq = pic->RequestEditSession(g_tid, session, TF_ES_READ, &phr);   // 异步只读
     const LONG k = InterlockedIncrement(&g_req);
-    if (k <= 6)
+    if (k <= kFirstNRequestLogs)
         Lf("TsfRequest#%ld RequestEditSession h=%08X phr=%08X", k, (unsigned)hreq, (unsigned)phr);
 }
 
@@ -175,7 +185,7 @@ extern "C" void TsfInit(void (*logfn)(const char* msg))
         Lf("TsfInit: Activate h=%08X tid=%u FAILED", (unsigned)ha, (unsigned)tid);
     }
 
-    if (g_timer.start(100, TsfTimer))   // RAII：100ms 刷新一次
+    if (g_timer.start(kExtentRefreshIntervalMs, TsfTimer))   // RAII：定时刷新
         TsfRequest();
     else
         L("TsfInit: SetTimer FAILED");
@@ -187,7 +197,7 @@ extern "C" BOOL TsfGetCaret(RECT* prc)
     TsfRequest();
     if (!prc || !g_rcValid) return FALSE;
     const DWORD age = GetTickCount() - (DWORD)g_rcTick;
-    if (age > 3000) return FALSE;
+    if (age > kExtentMaxAgeMs) return FALSE;
     const RECT rc = g_rc;
     if (rc.right <= rc.left || rc.bottom <= rc.top) return FALSE;
     *prc = rc;

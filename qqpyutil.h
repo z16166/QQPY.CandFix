@@ -14,6 +14,9 @@
 
 namespace qqpy {
 
+// 临界区自旋次数：稍大一点可减少上下文切换
+constexpr DWORD kCriticalSectionSpinCount = 4000;
+
 // ------------------------------------------------------------------ 内核句柄
 // RAII 包装：文件句柄、线程句柄等。不可拷贝、可移动。
 // 析构即 CloseHandle；INVALID_HANDLE_VALUE 视为"空"。
@@ -55,7 +58,7 @@ private:
 class CriticalSection
 {
 public:
-    CriticalSection() noexcept { InitializeCriticalSectionAndSpinCount(&m_cs, 4000); }
+    CriticalSection() noexcept { InitializeCriticalSectionAndSpinCount(&m_cs, kCriticalSectionSpinCount); }
     ~CriticalSection() { DeleteCriticalSection(&m_cs); }
 
     CriticalSection(const CriticalSection&) = delete;
