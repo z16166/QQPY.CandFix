@@ -115,12 +115,31 @@ ShowWindow(QQPinyinCompWndTSF, cmd=4) from QQPinyin.ime+1022AE  <- 引擎显示�
 
 ---
 
+### 资源管理与路径
+
+- **COM 接口指针**一律用 ATL 智能指针：`CComPtr` / `CComQIPtr`；自定义的 COM 对象
+  （只读编辑会话）用 `CComObjectRootEx` + `CComObject`（`BEGIN_COM_MAP`），
+  **不手写 `AddRef` / `Release`**。
+- **内核句柄**（文件、线程）用 `qqpy::UniqueHandle`；临界区用 `qqpy::CriticalSection` + `CsLock`；
+  线程定时器用 `qqpy::UniqueTimer`。全部 RAII，析构即释放。
+- **路径不硬编码盘符**：
+
+  | 用途 | 来源 |
+  |---|---|
+  | 本 DLL 所在目录 | `GetModuleFileNameW(本模块)` |
+  | ini / log 目录 | 优先 DLL 所在目录；退回 `SHGetKnownFolderPath(FOLDERID_ProgramData)`；再退回环境变量 `ProgramData` / `ALLUSERSPROFILE` |
+  | 真身 `QQPinyinTSF.dll` | `GetSystemDirectoryW()` + `\IME\QQPinyinTSF\QQPinyinTSF.dll`（32 位进程得到 SysWOW64，正好对应 32 位 IME）；可用 ini 的 `real=` 覆盖 |
+
+- 编译单元为什么要分开：`qqpyproxy.cpp` 定义了 `DllGetClassObject` 等导出，而 `combaseapi.h`
+  （经 `<objbase.h>` / ATL 引入）也声明了它们，同一编译单元会 **C2375 redefinition, different linkage**。
+  所以导出所在的文件保持"干净"（只引 `windows.h`），COM/ATL 代码放在 `qqpytsf.cpp` / `qqpyutil.cpp`。
 ## 三、文件
 
 | 文件 | 说明 |
 |---|---|
 | `qqpyproxy.cpp` | 代理 DLL：转发 + 假插入符 + 过滤器补丁 |
 | `qqpytsf.cpp` | TSF 那部分（独立编译单元，避免 `<objbase.h>` 与 `DllGetClassObject` 声明冲突） |
+| `qqpyutil.h` / `qqpyutil.cpp` | RAII 工具（`UniqueHandle` / `CriticalSection` / `CsLock` / `UniqueTimer`）与路径解析（全部来自 API 或环境变量）。头文件刻意不引 ATL/objbase |
 | `build-proxy-win7.cmd` | **正式构建**：v142 toolset + SDK 10.0.17763.0 + 静态 CRT，产出可在 Win7 x64 运行 |
 | `build-proxy.cmd` | 同上（薄封装，直接调用 Win7 版；避免误编出非 Win7 产物） |
 | `qqpyproxy-install-machine.cmd` | 安装：HKLM 重定向到代理（需管理员，自动备份原值） |
@@ -163,6 +182,8 @@ build-proxy-win7.cmd
 | CRT | **静态 `/MT`** —— 不依赖 VCRUNTIME140 / MSVCP140 / UCRT，无需任何运行库 |
 | 定义 | `_WIN32_WINNT=0x0601`、`WINVER=0x0601`、`NTDDI_VERSION=0x06010000` |
 | 链接 | `/SUBSYSTEM:WINDOWS,6.01 /DYNAMICBASE /NXCOMPAT` |
+| 语言标准 | `/std:c++17` |
+| ATL | `CComPtr` 等来自 ATL。若 v142 未安装 "C++ ATL" 组件，脚本会自动挑同一个 VS 下**头文件与 atls.lib 同版本**的 ATL（优先最旧、最接近 v142），并用 `/I` + `/LIBPATH` 指过去。装上 "C++ ATL for v142" 即可去掉这个回退 |
 
 选 SDK 版本靠 `vcvarsall.bat x64 10.0.17763.0 -vcvars_ver=14.29`；换机器时改脚本里的 `VS=` 路径即可。
 
@@ -198,7 +219,7 @@ Win8+ API   : 无（全部导入函数逐个核对过）
 
 ---
 
-## 六、配置 `C:\ProgramData\QQPYCandFix\qqpyproxy.ini`
+## 六、配置 `<DLL 所在目录>\qqpyproxy.ini`
 
 ```ini
 real=C:\WINDOWS\system32\IME\QQPinyinTSF\QQPinyinTSF.dll

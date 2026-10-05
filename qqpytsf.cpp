@@ -1,7 +1,8 @@
 // qqpytsf.cpp —— 向 TSF 索取宿主的真实光标矩形
 //
-// 独立编译单元：<objbase.h>/<msctf.h> 会和本 DLL 的 DllGetClassObject/DllCanUnloadNow
-// 声明冲突（C2375 different linkage），所以隔离开。
+// 独立编译单元：<objbase.h> / ATL 会和本 DLL 的 DllGetClassObject / DllCanUnloadNow
+// 声明冲突（C2375 different linkage），所以 COM 相关的代码全部集中在这里，
+// 导出所在的 qqpyproxy.cpp 保持"干净"。
 //
 // 背景：WT 实现了 ITfContextOwner::GetTextExt
 //   src/tsf/Implementation.cpp:315  ->  *prc = _provider->GetCursorPosition();
@@ -9,31 +10,44 @@
 // 它就是"终端光标所在字符格的屏幕矩形"。QQ拼音外壳只问 Win32 插入符（WT 没有），
 // 所以这里替它去问 TSF。
 //
-// 只用【异步只读编辑会话】取矩形：RequestEditSession(..., TF_ES_READ, ...) 不阻塞
-// UI 线程，没有死锁风险；外加一个 100ms 线程定时器持续刷新，光标一动缓存就更新。
+// 资源管理：COM 接口指针一律用 ATL 智能指针（CComPtr / CComQIPtr），
+// 自定义 COM 对象用 CComObjectRootEx + CComObject（不手写 AddRef/Release），
+// 定时器用 qqpy::UniqueTimer（RAII）。
+//
+// 取矩形只用【异步只读编辑会话】：RequestEditSession(..., TF_ES_READ, ...) 不阻塞
+// UI 线程，没有死锁风险；外加 100ms 定时器持续刷新，光标一动缓存就更新。
 //
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <objbase.h>
 #include <msctf.h>
+#include <atlbase.h>
+#include <atlcom.h>
 #include <stdarg.h>
-#include <new>
+#include <string>
+#include "qqpyutil.h"
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "user32.lib")
 
-static ITfThreadMgr* g_ptm = nullptr;
-static TfClientId    g_tid = 0;
-static RECT          g_rc = {0, 0, 0, 0};
-static volatile LONG g_rcValid = 0;
-static volatile LONG g_rcTick = 0;
-static volatile LONG g_lastReq = 0;
-static volatile LONG g_req = 0;
-static volatile LONG g_sess = 0;
-static void        (*g_log)(const char*) = nullptr;
+using ATL::CComPtr;
+using ATL::CComQIPtr;
 
-static void Lf(const char* fmt, ...)
+namespace {
+
+CComPtr<ITfThreadMgr> g_ptm;          // 本线程的 TSF 线程管理器（RAII）
+TfClientId    g_tid = 0;              // 本线程的 TSF client id
+RECT          g_rc = {0, 0, 0, 0};
+volatile LONG g_rcValid = 0;
+volatile LONG g_rcTick = 0;
+volatile LONG g_lastReq = 0;
+volatile LONG g_req = 0;
+volatile LONG g_sess = 0;
+void        (*g_log)(const char*) = nullptr;
+qqpy::UniqueTimer g_timer;            // 定时器（RAII）
+
+void Lf(const char* fmt, ...)
 {
     if (!g_log) return;
     char buf[512];
@@ -42,129 +56,129 @@ static void Lf(const char* fmt, ...)
     va_end(ap);
     g_log(buf);
 }
-static void L(const char* s) { if (g_log) g_log(s); }
 
-class CExtentSession : public ITfEditSession
+void L(const char* s) { if (g_log) g_log(s); }
+
+// 只读编辑会话：在 TSF 给的 edit cookie 下问宿主"光标在哪一格"
+class CExtentSession : public CComObjectRootEx<CComSingleThreadModel>, public ITfEditSession
 {
-    volatile LONG m_ref = 1;
 public:
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
-    {
-        if (!ppv) return E_POINTER;
-        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_ITfEditSession)) {
-            *ppv = static_cast<ITfEditSession*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    STDMETHODIMP_(ULONG) AddRef() override { return (ULONG)InterlockedIncrement(&m_ref); }
-    STDMETHODIMP_(ULONG) Release() override
-    {
-        LONG r = InterlockedDecrement(&m_ref);
-        if (r == 0) delete this;
-        return (ULONG)r;
-    }
+    BEGIN_COM_MAP(CExtentSession)
+        COM_INTERFACE_ENTRY(ITfEditSession)
+    END_COM_MAP()
 
-    STDMETHODIMP DoEditSession(TfEditCookie ec) override
+    HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie ec) override
     {
-        ITfDocumentMgr* pdim = nullptr;
-        ITfContext* pic = nullptr;
-        ITfContextView* pview = nullptr;
-        ITfRange* prange = nullptr;
-        ULONG nsel = 0;
+        CComPtr<ITfDocumentMgr> pdim;
+        CComPtr<ITfContext>     pic;
+        CComPtr<ITfContextView> pview;
+        CComPtr<ITfRange>       range;
+
         HRESULT h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL, h4 = E_FAIL, h5 = E_FAIL;
         RECT rc = {0, 0, 0, 0};
         BOOL clipped = FALSE;
-        LONG n = InterlockedIncrement(&g_sess);
+        const LONG n = InterlockedIncrement(&g_sess);
 
         if (g_ptm) h1 = g_ptm->GetFocus(&pdim);
         if (SUCCEEDED(h1) && pdim) h2 = pdim->GetTop(&pic);
-        if (SUCCEEDED(h2) && pic) {
+        if (SUCCEEDED(h2) && pic)
+        {
             h3 = pic->GetActiveView(&pview);
-            if (SUCCEEDED(h3) && pview) {
+            if (SUCCEEDED(h3) && pview)
+            {
                 // GetTextExt 的 pRange 不能为 NULL，先取当前选区；失败则退到文档起点
                 TF_SELECTION sel = {};
+                ULONG nsel = 0;
                 h5 = pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &nsel);
-                if (SUCCEEDED(h5) && nsel == 1 && sel.range) {
-                    h4 = pview->GetTextExt(ec, sel.range, &rc, &clipped);
-                    sel.range->Release();
-                } else if (SUCCEEDED(pic->GetStart(ec, &prange)) && prange) {
-                    h4 = pview->GetTextExt(ec, prange, &rc, &clipped);
-                    prange->Release();
-                }
+                if (SUCCEEDED(h5) && nsel == 1 && sel.range)
+                    range.Attach(sel.range);            // 接管 GetSelection 给出的引用，RAII 释放
+                else if (SUCCEEDED(pic->GetStart(ec, &range)) && range)
+                    h5 = S_OK;
+
+                if (range)
+                    h4 = pview->GetTextExt(ec, range, &rc, &clipped);
             }
         }
+
         if (n <= 6 || (n % 500) == 0)
             Lf("TsfSession#%ld GetFocus=%08X GetTop=%08X GetView=%08X GetRange=%08X GetTextExt=%08X rc=(%d,%d-%d,%d) clipped=%d",
                n, (unsigned)h1, (unsigned)h2, (unsigned)h3, (unsigned)h5, (unsigned)h4,
                rc.left, rc.top, rc.right, rc.bottom, (int)clipped);
 
-        if (SUCCEEDED(h4) && rc.right > rc.left && rc.bottom > rc.top) {
+        if (SUCCEEDED(h4) && rc.right > rc.left && rc.bottom > rc.top)
+        {
             g_rc = rc;
             g_rcTick = (LONG)GetTickCount();
             InterlockedExchange(&g_rcValid, 1);
         }
-        if (pview) pview->Release();
-        if (pic) pic->Release();
-        if (pdim) pdim->Release();
         return S_OK;
     }
 };
 
-static void TsfRequest()
+void TsfRequest()
 {
-    if (!g_ptm || !g_tid) return;
-    DWORD now = GetTickCount();
+    if (!g_ptm) return;
+    const DWORD now = GetTickCount();
     LONG prev = g_lastReq;
     if (now - (DWORD)prev < 80) return;                       // 限流
     if (InterlockedCompareExchange(&g_lastReq, (LONG)now, prev) != prev) return;
 
-    ITfDocumentMgr* pdim = nullptr;
+    CComPtr<ITfDocumentMgr> pdim;
     if (FAILED(g_ptm->GetFocus(&pdim)) || !pdim) return;
 
-    ITfContext* pic = nullptr;
-    if (SUCCEEDED(pdim->GetTop(&pic)) && pic) {
-        CExtentSession* s = new (std::nothrow) CExtentSession();
-        if (s) {
-            HRESULT phr = S_OK;
-            HRESULT hreq = pic->RequestEditSession(g_tid, s, TF_ES_READ, &phr);
-            LONG k = InterlockedIncrement(&g_req);
-            if (k <= 6) Lf("TsfRequest#%ld RequestEditSession h=%08X phr=%08X", k, (unsigned)hreq, (unsigned)phr);
-            s->Release();
-        }
-        pic->Release();
-    }
-    pdim->Release();
+    CComPtr<ITfContext> pic;
+    if (FAILED(pdim->GetTop(&pic)) || !pic) return;
+
+    CComObject<CExtentSession>* raw = nullptr;
+    if (FAILED(CComObject<CExtentSession>::CreateInstance(&raw)) || !raw) return;
+
+    // CreateInstance 出来的对象引用计数为 0；下面的智能指针会 QI 并 AddRef。
+    // COM_MAP 里声明了 ITfEditSession，QI 必然成功。
+    CComQIPtr<ITfEditSession> session(raw);
+    if (!session) return;
+
+    HRESULT phr = S_OK;
+    const HRESULT hreq = pic->RequestEditSession(g_tid, session, TF_ES_READ, &phr);   // 异步只读
+    const LONG k = InterlockedIncrement(&g_req);
+    if (k <= 6)
+        Lf("TsfRequest#%ld RequestEditSession h=%08X phr=%08X", k, (unsigned)hreq, (unsigned)phr);
 }
 
-static VOID CALLBACK TsfTimer(HWND, UINT, UINT_PTR, DWORD) { TsfRequest(); }
+VOID CALLBACK TsfTimer(HWND, UINT, UINT_PTR, DWORD) { TsfRequest(); }
+
+} // namespace
 
 extern "C" void TsfInit(void (*logfn)(const char* msg))
 {
     g_log = logfn;
     if (g_ptm) return;
 
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // 宿主已初始化，这里只是 +1
-    ITfThreadMgr* ptm = nullptr;
-    HRESULT h = CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
-                                 IID_ITfThreadMgr, (void**)&ptm);
-    if (FAILED(h) || !ptm) { Lf("TsfInit: CoCreateInstance h=%08X FAILED", (unsigned)h); return; }
-    g_ptm = ptm;
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // 宿主已初始化过，这里只是引用计数 +1
+    if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&g_ptm))) || !g_ptm)
+    {
+        L("TsfInit: CoCreateInstance(CLSID_TF_ThreadMgr) FAILED");
+        g_ptm.Release();
+        return;
+    }
 
     // ITfThreadMgr 没有 CreateClientId；Activate 返回本线程的 client id
     TfClientId tid = 0;
-    HRESULT ha = g_ptm->Activate(&tid);
-    if (SUCCEEDED(ha) && tid) {
+    const HRESULT ha = g_ptm->Activate(&tid);
+    if (SUCCEEDED(ha) && tid)
+    {
         g_tid = tid;
         Lf("TsfInit: ok tid=%u h=%08X", (unsigned)tid, (unsigned)ha);
-    } else {
+    }
+    else
+    {
         Lf("TsfInit: Activate h=%08X tid=%u FAILED", (unsigned)ha, (unsigned)tid);
     }
 
-    SetTimer(nullptr, 0, 100, TsfTimer);   // 线程定时器，持续刷新光标矩形
-    TsfRequest();
+    if (g_timer.start(100, TsfTimer))   // RAII：100ms 刷新一次
+        TsfRequest();
+    else
+        L("TsfInit: SetTimer FAILED");
 }
 
 // TRUE = 有 3 秒内的新鲜光标矩形（屏幕坐标）
@@ -172,9 +186,9 @@ extern "C" BOOL TsfGetCaret(RECT* prc)
 {
     TsfRequest();
     if (!prc || !g_rcValid) return FALSE;
-    DWORD age = GetTickCount() - (DWORD)g_rcTick;
+    const DWORD age = GetTickCount() - (DWORD)g_rcTick;
     if (age > 3000) return FALSE;
-    RECT rc = g_rc;
+    const RECT rc = g_rc;
     if (rc.right <= rc.left || rc.bottom <= rc.top) return FALSE;
     *prc = rc;
     return TRUE;

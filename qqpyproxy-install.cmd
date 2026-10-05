@@ -5,7 +5,9 @@ rem  Redirect QQ Pinyin TIP InprocServer32 to the proxy DLL.
 rem  HKCU only (current user). No HKLM change, no file content change.
 rem  Undo with: qqpyproxy-restore.cmd
 rem ============================================================
-set "DIR=C:\ProgramData\QQPYCandFix"
+rem Directory comes from the environment, never hardcoded.
+set "DIR=%ProgramData%\QQPYCandFix"
+if not defined ProgramData set "DIR=%ALLUSERSPROFILE%\QQPYCandFix"
 set "CLSID={AE51F1C0-807F-4A64-AC55-F2ADF92E2603}"
 set "HKCUKEY=HKCU\Software\Classes\CLSID\%CLSID%\InprocServer32"
 set "HKLMKEY=HKLM\SOFTWARE\Classes\CLSID\%CLSID%\InprocServer32"
