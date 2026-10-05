@@ -150,6 +150,7 @@ ShowWindow(QQPinyinCompWndTSF, cmd=4) from QQPinyin.ime+1022AE  <- 引擎显示�
 | `qqpyproxy-restore-machine.cmd` | 卸载/兜底：还原原始注册表值 |
 | `qqpyproxy-install.cmd` / `qqpyproxy-restore.cmd` | 早期 HKCU 方案（**实测 COM 不认 HKCU 覆盖这个 CLSID，已弃用**，留作记录） |
 | `_win.ps1` / `_poll.ps1` | 诊断用的小工具（监视 WT 进程的模块/窗口几何） |
+| `repro/` | 可复现的验证程序（源码，不含二进制）：`patchverify.cpp` 直接调用真身 `sub_18000AF70` 对比打补丁前后的返回值；`atlrepro*.cpp` 是 ATL 空模块崩溃的隔离实验；`abhost.cpp` 是以 `WindowsTerminal.exe` 之名加载代理的 A/B 宿主 |
 
 运行时布局 `C:\ProgramData\QQPYCandFix\`：
 
