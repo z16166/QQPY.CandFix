@@ -183,9 +183,10 @@ build-proxy-win7.cmd
 | 定义 | `_WIN32_WINNT=0x0601`、`WINVER=0x0601`、`NTDDI_VERSION=0x06010000` |
 | 链接 | `/SUBSYSTEM:WINDOWS,6.01 /DYNAMICBASE /NXCOMPAT` |
 | 语言标准 | `/std:c++17` |
-| ATL | `CComPtr` 等来自 ATL。若 v142 未安装 "C++ ATL" 组件，脚本会自动挑同一个 VS 下**头文件与 atls.lib 同版本**的 ATL（优先最旧、最接近 v142），并用 `/I` + `/LIBPATH` 指过去。装上 "C++ ATL for v142" 即可去掉这个回退 |
+| ATL | `CComPtr` / `CComQIPtr` / `CComObject` / `CComHeapPtr` 来自 ATL。脚本按 toolset 从旧到新找一份**头文件与 `atls.lib` 同版本**的 ATL，并用 `/I` + `/LIBPATH` 显式指定（不依赖 vcvars 是否把它加进包含路径）。装有 "C++ ATL for v142" 时正好取到 v142 那一份 |
 
 选 SDK 版本靠 `vcvarsall.bat x64 10.0.17763.0 -vcvars_ver=14.29`；换机器时改脚本里的 `VS=` 路径即可。
+Visual Studio 与 ATL 的位置都由脚本探测（`vswhere` + ATL 存在性检查），不需要手改路径。
 
 产物自检（实测结果）：
 
