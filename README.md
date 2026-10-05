@@ -276,7 +276,46 @@ call qword ptr [rax+8]      ; -> _pAtlModule->Lock()
 **修法**：改成手写 IUnknown（引用计数从 0 开始，由 `CComQIPtr` 的 QI/AddRef 接管），
 整套 ATL 对象机制不再参与 —— 新构建里 `CComObject` / `CComObjectRootEx` / `_pAtlModule`
 符号数均为 **0**；接口**指针**仍然全部由 `CComPtr` / `CComQIPtr` 管理。
-## 八、注意事项
+## 八、杀毒软件会报毒（已知问题，附恢复步骤）
+
+本工具的行为**本质上就是 COM 劫持 + 内存补丁**，所以被启发式/机器学习引擎判为木马是必然的。实测（Windows Defender）：
+
+```
+Trojan:Win32/Wacatac.B!ml                (severity 5, 已处置)
+Behavior:Win32/DefenseEvasion.A!ml       (severity 5)     ← !ml = 机器学习判定
+处置记录:
+  clsid:_HKLM\SOFTWARE\CLASSES\CLSID\{AE51F1C0-…} | file:…\qqpyproxy.dll | regkey:…
+  file:…\qqpyproxy.dll
+```
+
+注意 Defender 的清理是**成对**的：删 DLL 的同时会把那个 CLSID 键一起删掉。
+
+**典型症状**（很容易误判成"输入法坏了"）：
+
+- 已经开着的程序（例如当前那个 Windows Terminal）输入法照旧可用；
+- **新启动的 64 位程序里输入法整个失效** —— Shift 不切换、打不出中文，例如 Notepad。
+
+**恢复**（30 秒）：
+
+```bat
+reg import "C:\ProgramData\QQPYCandFix\backup-CLSID.reg"   :: 安装时留的原始注册表备份
+```
+
+再把 `qqpyproxy.dll` 从 Defender 隔离区恢复出来，然后重跑 `qqpyproxy-install-machine.cmd`。
+安装脚本在发现键缺失时会**自动导入那份备份**（脚本不会替你改杀毒设置）。
+
+**减少复发**：把 `C:\ProgramData\QQPYCandFix` 加入 Defender 排除项（设置 → 病毒和威胁防护 → 排除项）。
+这确实降低了一点防护，请自行权衡；本工具不会替你改。
+
+**想根治误报**：向微软提交误报 → https://www.microsoft.com/en-us/wdsi/filesubmission
+
+**如何确认手里这个 DLL 就是本项目构建的**：比较 `.text`（代码段）的 MD5 ——
+整文件哈希每次编译都不同（PE 时间戳），但代码段一致就说明是同一份代码：
+
+```powershell
+# 见 repro/ 里的思路：解析 PE 头取出 .text 段做 MD5
+```
+## 九、注意事项
 
 - **QQ拼音升级 / 修复安装 / 重新注册 TIP 会把注册表改回去** → 重跑一次安装脚本即可。
 - 32 位宿主不受影响（只改了 64 位视图）。

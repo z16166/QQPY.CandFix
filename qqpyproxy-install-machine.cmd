@@ -31,10 +31,17 @@ for /f "tokens=2,*" %%a in ('reg query "%KEY%" /ve /reg:64 2^>nul ^| findstr /i 
 reg query "HKLM\SOFTWARE\Classes\CLSID\%CLSID%" /reg:64 >nul 2>&1
 if errorlevel 1 (
     echo [!] the 64-bit CLSID key is MISSING - new 64-bit apps cannot load the IME.
+    echo     ^(Windows Defender removes it together with the DLL when it flags the proxy^)
     if exist "%DIR%\backup-CLSID.reg" (
-        echo     restore it first with:  reg import "%DIR%\backup-CLSID.reg"
+        reg import "%DIR%\backup-CLSID.reg" >nul 2>&1
+        reg query "HKLM\SOFTWARE\Classes\CLSID\%CLSID%" /reg:64 >nul 2>&1
+        if errorlevel 1 (
+            echo [x] restoring from %DIR%\backup-CLSID.reg FAILED
+        ) else (
+            echo [i] restored the key from the pristine backup
+        )
     ) else (
-        echo     no backup found; the key has to be re-registered by reinstalling QQ Pinyin.
+        echo [x] no %DIR%\backup-CLSID.reg - the key has to be re-registered by reinstalling QQ Pinyin.
     )
 )
 
