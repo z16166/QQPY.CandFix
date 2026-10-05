@@ -34,88 +34,86 @@
 #include <string>
 #include "qqpyutil.h"
 
-typedef BOOL (WINAPI *PFN_GGTI)(DWORD, PGUITHREADINFO);
+typedef BOOL(WINAPI* PFN_GGTI)(DWORD, PGUITHREADINFO);
 
-namespace {
+namespace
+{
 
 // ------------------------------------------------------------------ 常量
 // 插入符模式（对应 ini 的 mode=）
 enum CaretMode : LONG
 {
-    kModePassThrough = 0,   // 只挂钩、不改动（诊断用）
-    kModeFakeCaret   = 1,   // 修复：宿主没有 Win32 插入符时补一个
-    kModeKillCaret   = 2,   // 反向验证：强行抹掉宿主的插入符
+    kModePassThrough = 0,  // 只挂钩、不改动（诊断用）
+    kModeFakeCaret   = 1,  // 修复：宿主没有 Win32 插入符时补一个
+    kModeKillCaret   = 2,  // 反向验证：强行抹掉宿主的插入符
 };
 
-constexpr LONG  kCaretModeMin = kModePassThrough;
-constexpr LONG  kCaretModeMax = kModeKillCaret;
+constexpr LONG kCaretModeMin = kModePassThrough;
+constexpr LONG kCaretModeMax = kModeKillCaret;
 
 // 拿不到 TSF 光标时的回退定位（ini 的 dx= / dy=）
-constexpr LONG  kDefaultFallbackDx = 8;
-constexpr LONG  kDefaultFallbackDy = 8;
-constexpr LONG  kFallbackDxMin = -500;
-constexpr LONG  kFallbackDxMax = 4000;
-constexpr LONG  kFallbackDyMin = 0;
-constexpr LONG  kFallbackDyMax = 4000;
+constexpr LONG kDefaultFallbackDx = 8;
+constexpr LONG kDefaultFallbackDy = 8;
+constexpr LONG kFallbackDxMin     = -500;
+constexpr LONG kFallbackDxMax     = 4000;
+constexpr LONG kFallbackDyMin     = 0;
+constexpr LONG kFallbackDyMax     = 4000;
 
 // 假插入符自身尺寸与留边（进程坐标）
-constexpr int   kFakeCaretWidth       = 2;
-constexpr int   kFakeCaretHeight      = 20;
-constexpr int   kMinCaretHeight       = 2;    // 低于此高度就不做半格下移
-constexpr int   kWorkAreaMargin       = 2;    // 不贴死工作区边缘
-constexpr int   kFallbackMarginRight  = 6;
-constexpr int   kFallbackMarginBottom = 24;
-constexpr int   kMinAnchorSize        = 60;   // 太小的窗口不作为锚点
+constexpr int kFakeCaretWidth       = 2;
+constexpr int kFakeCaretHeight      = 20;
+constexpr int kMinCaretHeight       = 2;  // 低于此高度就不做半格下移
+constexpr int kWorkAreaMargin       = 2;  // 不贴死工作区边缘
+constexpr int kFallbackMarginRight  = 6;
+constexpr int kFallbackMarginBottom = 24;
+constexpr int kMinAnchorSize        = 60;  // 太小的窗口不作为锚点
 
 // 候选框垂直位置：引擎把框的顶边放在插入符矩形的垂直中心，
 // 所以整体下移半格（h / kShiftHalfCell）；判断"下方是否放得下"时
 // 预留 kRoomBelowCells 格作为候选框高度。
-constexpr int   kShiftHalfCell  = 2;
-constexpr int   kRoomBelowCells = 3;
+constexpr int kShiftHalfCell  = 2;
+constexpr int kRoomBelowCells = 3;
 
 // 日志与配置
-constexpr LONG  kLogMaxLines          = 600;   // 日志行数上限
-constexpr DWORD kIniReloadIntervalMs  = 1500;  // ini 热重载间隔（dx/dy/log 可热改）
+constexpr LONG   kLogMaxLines         = 600;   // 日志行数上限
+constexpr DWORD  kIniReloadIntervalMs = 1500;  // ini 热重载间隔（dx/dy/log 可热改）
 constexpr size_t kIniMaxBytes         = 2048;
 constexpr size_t kLogLineMax          = 900;
 constexpr size_t kCallerTagMax        = 128;
 constexpr size_t kClassNameMax        = 80;
-constexpr size_t kIniSeparatorLen     = 1;     // ini 里 "key=value" 的 '=' 占一个字符
-constexpr int   kFirstNHookLogs       = 6;     // 前 N 次钩子调用写日志
-constexpr int   kFirstNFullLogs       = 8;     // 前 N 次写完整坐标
+constexpr size_t kIniSeparatorLen     = 1;  // ini 里 "key=value" 的 '=' 占一个字符
+constexpr int    kFirstNHookLogs      = 6;  // 前 N 次钩子调用写日志
+constexpr int    kFirstNFullLogs      = 8;  // 前 N 次写完整坐标
 
 // 外壳 QQPinyinTSF.dll!sub_18000AF70 的候选窗消息过滤器（详见 PatchCandFilter）
-constexpr DWORD kCandFilterFilterRva     = 0xAFBD;  // test byte ptr [rbx+3B9Ch],40h 所在 RVA
-constexpr DWORD kCandFilterReturnZeroRva = 0xAFDA;  // 同函数里 xor eax,eax ; add rsp,20h ; pop rbx ; retn
-constexpr size_t kCandFilterPatchSize    = 2;       // jmp rel8 的长度
-constexpr BYTE  kOpcodeJmpShort          = 0xEB;
+constexpr DWORD  kCandFilterFilterRva     = 0xAFBD;  // test byte ptr [rbx+3B9Ch],40h 所在 RVA
+constexpr DWORD  kCandFilterReturnZeroRva = 0xAFDA;  // 同函数里 xor eax,eax ; add rsp,20h ; pop rbx ; retn
+constexpr size_t kCandFilterPatchSize     = 2;       // jmp rel8 的长度
+constexpr BYTE   kOpcodeJmpShort          = 0xEB;
 // 直接跳到"返回 0"，跳过"返回 1"（即不拦候选窗消息）
-constexpr BYTE  kCandFilterPatch[kCandFilterPatchSize] =
-{
-    kOpcodeJmpShort,
-    (BYTE)(kCandFilterReturnZeroRva - kCandFilterFilterRva - kCandFilterPatchSize)
-};
+constexpr BYTE kCandFilterPatch[kCandFilterPatchSize] = {
+    kOpcodeJmpShort, (BYTE)(kCandFilterReturnZeroRva - kCandFilterFilterRva - kCandFilterPatchSize)};
 // 打补丁前必须匹配的原始字节，防止版本不符时改错地方
-constexpr BYTE  kCandFilterOriginal[7] = { 0xF6, 0x83, 0x9C, 0x3B, 0x00, 0x00, 0x40 };
+constexpr BYTE kCandFilterOriginal[7] = {0xF6, 0x83, 0x9C, 0x3B, 0x00, 0x00, 0x40};
 
 // 等引擎 QQPinyin.ime 被外壳加载出来的节奏
-constexpr int   kEngineWaitIterations = 3600;   // 3600 * 500ms = 30 分钟
+constexpr int   kEngineWaitIterations = 3600;  // 3600 * 500ms = 30 分钟
 constexpr DWORD kEngineWaitIntervalMs = 500;
 // ------------------------------------------------------------------ 状态
-HMODULE       g_real = nullptr;
-PFN_GGTI      g_realGGTI = nullptr;
-volatile LONG g_mode = kModeFakeCaret;
-volatile LONG g_dx = kDefaultFallbackDx;  // 回退定位：假插入符距客户区左边界的偏移
-volatile LONG g_dy = kDefaultFallbackDy;  // 回退定位：假插入符底边距客户区下边界的距离
-volatile LONG g_logOn = 0;
-volatile LONG g_logCount = 0;
+HMODULE       g_real      = nullptr;
+PFN_GGTI      g_realGGTI  = nullptr;
+volatile LONG g_mode      = kModeFakeCaret;
+volatile LONG g_dx        = kDefaultFallbackDx;  // 回退定位：假插入符距客户区左边界的偏移
+volatile LONG g_dy        = kDefaultFallbackDy;  // 回退定位：假插入符底边距客户区下边界的距离
+volatile LONG g_logOn     = 0;
+volatile LONG g_logCount  = 0;
 volatile LONG g_hookCount = 0;
 
-qqpy::CriticalSection g_cfgLock;      // 保护下面两个字符串
-std::wstring          g_realPath;     // 真身路径
-std::string           g_hosts;        // 宿主名单
+qqpy::CriticalSection g_cfgLock;   // 保护下面两个字符串
+std::wstring          g_realPath;  // 真身路径
+std::string           g_hosts;     // 宿主名单
 
-qqpy::UniqueHandle    g_logFile;      // 日志文件句柄（RAII）
+qqpy::UniqueHandle    g_logFile;  // 日志文件句柄（RAII）
 qqpy::CriticalSection g_logLock;
 
 int PatchIAT(HMODULE mod, void* target, void* repl);
@@ -127,8 +125,8 @@ void LogFileEnsure()
     if (g_logFile.valid()) return;
     const std::wstring path = qqpy::LogPath();
     if (path.empty()) return;
-    g_logFile.reset(::CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    g_logFile.reset(::CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                  OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
 }
 
 void Log(const char* fmt, ...)
@@ -140,17 +138,17 @@ void Log(const char* fmt, ...)
     LogFileEnsure();
     if (!g_logFile.valid()) return;
 
-    char buf[kLogLineMax];
+    char       buf[kLogLineMax];
     SYSTEMTIME st;
     ::GetLocalTime(&st);
-    int n = wsprintfA(buf, "[%02d:%02d:%02d.%03d pid=%lu] ", st.wHour, st.wMinute, st.wSecond,
-                      st.wMilliseconds, (unsigned long)::GetCurrentProcessId());
+    int     n = wsprintfA(buf, "[%02d:%02d:%02d.%03d pid=%lu] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                          (unsigned long)::GetCurrentProcessId());
     va_list ap;
     va_start(ap, fmt);
     n += wvsprintfA(buf + n, fmt, ap);
     va_end(ap);
-    buf[n++] = '\r';
-    buf[n++] = '\n';
+    buf[n++]      = '\r';
+    buf[n++]      = '\n';
     DWORD written = 0;
     ::WriteFile(g_logFile.get(), buf, (DWORD)n, &written, nullptr);
 }
@@ -162,12 +160,13 @@ void CallerTagOf(void* ra, char* out, int cch)
 {
     HMODULE m = nullptr;
     if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                             reinterpret_cast<LPCWSTR>(ra), &m) && m)
+                             reinterpret_cast<LPCWSTR>(ra), &m) &&
+        m)
     {
         char name[MAX_PATH] = {};
         ::GetModuleFileNameA(m, name, MAX_PATH);
         const char* base = strrchr(name, '\\');
-        base = base ? base + 1 : name;
+        base             = base ? base + 1 : name;
         wsprintfA(out, "%s+%X", base, (unsigned)((const BYTE*)ra - (const BYTE*)m));
     }
     else
@@ -181,11 +180,10 @@ void CallerTagOf(void* ra, char* out, int cch)
 size_t FindKey(const std::string& text, const char* key)
 {
     const std::string pat = std::string(key) + "=";
-    size_t pos = 0;
+    size_t            pos = 0;
     while ((pos = text.find(pat, pos)) != std::string::npos)
     {
-        if (pos == 0 || text[pos - 1] == '\n' || text[pos - 1] == '\r' ||
-            text[pos - 1] == ' ' || text[pos - 1] == '\t')
+        if (pos == 0 || text[pos - 1] == '\n' || text[pos - 1] == '\r' || text[pos - 1] == ' ' || text[pos - 1] == '\t')
             return pos;
         pos += pat.size();
     }
@@ -205,22 +203,22 @@ std::string IniGetStr(const std::string& text, const char* key)
     const size_t pos = FindKey(text, key);
     if (pos == std::string::npos) return std::string();
     size_t begin = pos + strlen(key) + kIniSeparatorLen;
-    size_t end = text.find_first_of("\r\n", begin);
+    size_t end   = text.find_first_of("\r\n", begin);
     if (end == std::string::npos) end = text.size();
     return text.substr(begin, end - begin);
 }
 
-std::string IniText()   // 读 ini 全文（文件句柄 RAII）
+std::string IniText()  // 读 ini 全文（文件句柄 RAII）
 {
     const std::wstring ini = qqpy::IniPath();
     if (ini.empty()) return std::string();
 
-    qqpy::UniqueHandle h(::CreateFileW(ini.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    qqpy::UniqueHandle h(::CreateFileW(ini.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!h.valid()) return std::string();
 
-    char buf[kIniMaxBytes] = {};
-    DWORD rd = 0;
+    char  buf[kIniMaxBytes] = {};
+    DWORD rd                = 0;
     if (!::ReadFile(h.get(), buf, sizeof(buf) - 1, &rd, nullptr)) return std::string();
     return std::string(buf, rd);
 }
@@ -241,14 +239,14 @@ void ReloadIni(bool firstTime)
     static volatile LONG last = 0;
     if (!firstTime)
     {
-        const DWORD now = ::GetTickCount();
-        const LONG prev = last;
-        if (now - (DWORD)prev < kIniReloadIntervalMs) return;                    // 1.5 秒内不重复读
+        const DWORD now  = ::GetTickCount();
+        const LONG  prev = last;
+        if (now - (DWORD)prev < kIniReloadIntervalMs) return;  // 1.5 秒内不重复读
         if (InterlockedCompareExchange(&last, (LONG)now, prev) != prev) return;
     }
 
     const std::string text = IniText();
-    int v = 0;
+    int               v    = 0;
 
     if (IniGetInt(text, "mode", v) && v >= kCaretModeMin && v <= kCaretModeMax) InterlockedExchange(&g_mode, v);
     if (IniGetInt(text, "dx", v) && v >= kFallbackDxMin && v <= kFallbackDxMax) InterlockedExchange(&g_dx, v);
@@ -258,14 +256,14 @@ void ReloadIni(bool firstTime)
     if (firstTime)
     {
         std::wstring real = Widen(IniGetStr(text, "real"));
-        if (real.empty()) real = qqpy::DefaultRealDllPath();     // 由 GetSystemDirectoryW 推导
+        if (real.empty()) real = qqpy::DefaultRealDllPath();  // 由 GetSystemDirectoryW 推导
 
         std::string hosts = IniGetStr(text, "hosts");
         if (hosts.empty()) hosts = "WindowsTerminal.exe";
 
         qqpy::CsLock lock(g_cfgLock);
         g_realPath = real;
-        g_hosts = hosts;
+        g_hosts    = hosts;
     }
 }
 
@@ -282,7 +280,7 @@ bool HostMatches()
         WCHAR path[MAX_PATH] = {};
         if (!::GetModuleFileNameW(nullptr, path, MAX_PATH)) return false;
         const WCHAR* base = wcsrchr(path, L'\\');
-        base = base ? base + 1 : path;
+        base              = base ? base + 1 : path;
         ::WideCharToMultiByte(CP_ACP, 0, base, -1, me, MAX_PATH, nullptr, nullptr);
     }
 
@@ -295,9 +293,11 @@ bool HostMatches()
     const char* s = hosts.c_str();
     while (*s)
     {
-        while (*s == ' ' || *s == ';' || *s == ',') ++s;
+        while (*s == ' ' || *s == ';' || *s == ',')
+            ++s;
         const char* e = s;
-        while (*e && *e != ';' && *e != ',') ++e;
+        while (*e && *e != ';' && *e != ',')
+            ++e;
         const size_t n = (size_t)(e - s);
         if (n && n == strlen(me) && _strnicmp(s, me, n) == 0) return true;
         s = e;
@@ -308,7 +308,8 @@ bool HostMatches()
 // ------------------------------------------------------------------ TSF 真实光标（实现在 qqpytsf.cpp）
 extern "C" void TsfInit(void (*logfn)(const char* msg));
 extern "C" BOOL TsfGetCaret(RECT* prc);
-void TsfLog(const char* msg) { Log("%s", msg); }
+void            TsfLog(const char* msg)
+{ Log("%s", msg); }
 
 // ------------------------------------------------------------------ 插入符钩子
 BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
@@ -316,7 +317,7 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
     PFN_GGTI real = g_realGGTI;
     if (!real) return FALSE;
 
-    const BOOL ok = real(idThread, pgui);
+    const BOOL ok   = real(idThread, pgui);
     const LONG mode = g_mode;
     if (!pgui || mode == kModePassThrough) return ok;
 
@@ -325,7 +326,7 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
     if (mode == kModeKillCaret)
     {
         if (nth <= kFirstNHookLogs) Log("hook#%ld mode2: force hwndCaret=NULL (was %p)", nth, pgui->hwndCaret);
-        pgui->hwndCaret = nullptr;
+        pgui->hwndCaret    = nullptr;
         pgui->rcCaret.left = pgui->rcCaret.top = pgui->rcCaret.right = pgui->rcCaret.bottom = 0;
         return ok;
     }
@@ -360,9 +361,9 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
             const int h = rc.bottom - rc.top;
             // 引擎把候选框顶边放在插入符矩形的【垂直中心】，会压住那行拼音的下半部分，
             // 所以整体下移半格；窗口底部放不下时保持原样。
-            bool shift = false;
-            POINT org = {};
-            RECT  crc = {};
+            bool      shift    = false;
+            POINT     org      = {};
+            RECT      crc      = {};
             const int halfCell = h / kShiftHalfCell;
             if (h > kMinCaretHeight && ::ClientToScreen(anchor, &org) && ::GetClientRect(anchor, &crc))
                 shift = (rc.bottom + halfCell + kRoomBelowCells * h) < (org.y + crc.bottom);
@@ -372,38 +373,38 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
                 rc.bottom += halfCell;
             }
 
-            pgui->hwndCaret = anchor;
-            pgui->rcCaret.left = rc.left - wr.left;
-            pgui->rcCaret.top = rc.top - wr.top;
-            pgui->rcCaret.right = rc.right - wr.left;
+            pgui->hwndCaret      = anchor;
+            pgui->rcCaret.left   = rc.left - wr.left;
+            pgui->rcCaret.top    = rc.top - wr.top;
+            pgui->rcCaret.right  = rc.right - wr.left;
             pgui->rcCaret.bottom = rc.bottom - wr.top;
 
             if (nth <= kFirstNFullLogs)
             {
                 char who[kCallerTagMax];
                 CallerTagOf(_ReturnAddress(), who, sizeof(who));
-                Log("hook#%ld [%s] TSF-CARET screen=(%d,%d-%d,%d) h=%d shift=%d",
-                    nth, who, rc.left, rc.top, rc.right, rc.bottom, h, (int)shift);
+                Log("hook#%ld [%s] TSF-CARET screen=(%d,%d-%d,%d) h=%d shift=%d", nth, who, rc.left, rc.top, rc.right,
+                    rc.bottom, h, (int)shift);
             }
             return ok;
         }
     }
 
     // 回退：窗口客户区左下角（夹进显示器工作区，保证不出屏）
-    RECT cr = {};
+    RECT  cr  = {};
     POINT cli = {};
     if (!::GetClientRect(anchor, &cr)) return ok;
     if ((wr.bottom - wr.top) < kMinAnchorSize || (cr.bottom - cr.top) < kMinAnchorSize) return ok;
     if (!::ClientToScreen(anchor, &cli)) return ok;
 
-    ReloadIni(false);                                   // 允许热改 dx/dy
+    ReloadIni(false);  // 允许热改 dx/dy
     const int dx = g_dx, dy = g_dy;
-    int sx = cli.x + dx;
-    int sy = cli.y + (cr.bottom - cr.top) - dy - kFakeCaretHeight;
+    int       sx = cli.x + dx;
+    int       sy = cli.y + (cr.bottom - cr.top) - dy - kFakeCaretHeight;
 
     MONITORINFO mi = {};
-    mi.cbSize = sizeof(mi);
-    HMONITOR mon = ::MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+    mi.cbSize      = sizeof(mi);
+    HMONITOR mon   = ::MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
     if (mon && ::GetMonitorInfoW(mon, &mi))
     {
         if (sx < mi.rcWork.left + kWorkAreaMargin) sx = mi.rcWork.left + kWorkAreaMargin;
@@ -412,10 +413,10 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
         if (sy > mi.rcWork.bottom - kFallbackMarginBottom) sy = mi.rcWork.bottom - kFallbackMarginBottom;
     }
 
-    pgui->hwndCaret = anchor;
-    pgui->rcCaret.left = sx - wr.left;
-    pgui->rcCaret.right = pgui->rcCaret.left + kFakeCaretWidth;
-    pgui->rcCaret.top = sy - wr.top;
+    pgui->hwndCaret      = anchor;
+    pgui->rcCaret.left   = sx - wr.left;
+    pgui->rcCaret.right  = pgui->rcCaret.left + kFakeCaretWidth;
+    pgui->rcCaret.top    = sy - wr.top;
     pgui->rcCaret.bottom = pgui->rcCaret.top + kFakeCaretHeight;
 
     if (nth <= kFirstNFullLogs)
@@ -425,20 +426,20 @@ BOOL WINAPI Hook_GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
         char who[kCallerTagMax];
         CallerTagOf(_ReturnAddress(), who, sizeof(who));
         Log("hook#%ld [%s] FAKE anchor=%p(%s) win=(%d,%d %dx%d) work=(%d,%d-%d,%d) screen=(%d,%d) rc=(%d,%d,%d,%d)",
-            nth, who, anchor, cls, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
-            mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom, sx, sy,
-            pgui->rcCaret.left, pgui->rcCaret.top, pgui->rcCaret.right, pgui->rcCaret.bottom);
+            nth, who, anchor, cls, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, mi.rcWork.left,
+            mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom, sx, sy, pgui->rcCaret.left, pgui->rcCaret.top,
+            pgui->rcCaret.right, pgui->rcCaret.bottom);
     }
     return ok;
 }
 
 // ------------------------------------------------------------------ 诊断钩子
-typedef BOOL (WINAPI *PFN_ShowWindow)(HWND, int);
-typedef BOOL (WINAPI *PFN_SetWindowPos)(HWND, HWND, int, int, int, int, UINT);
-typedef LRESULT (WINAPI *PFN_SendMessageW)(HWND, UINT, WPARAM, LPARAM);
-typedef BOOL (WINAPI *PFN_PostMessageW)(HWND, UINT, WPARAM, LPARAM);
+typedef BOOL(WINAPI* PFN_ShowWindow)(HWND, int);
+typedef BOOL(WINAPI* PFN_SetWindowPos)(HWND, HWND, int, int, int, int, UINT);
+typedef LRESULT(WINAPI* PFN_SendMessageW)(HWND, UINT, WPARAM, LPARAM);
+typedef BOOL(WINAPI* PFN_PostMessageW)(HWND, UINT, WPARAM, LPARAM);
 
-PFN_ShowWindow   g_realShowWindow = nullptr;
+PFN_ShowWindow   g_realShowWindow   = nullptr;
 PFN_SetWindowPos g_realSetWindowPos = nullptr;
 PFN_SendMessageW g_realSendMessageW = nullptr;
 PFN_PostMessageW g_realPostMessageW = nullptr;
@@ -453,8 +454,10 @@ BOOL WINAPI Hook_ShowWindow(HWND h, int cmd)
 {
     if (g_logOn)
     {
-        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax];
+        CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];
+        ClassOf(h, cls, sizeof(cls));
         Log("ShowWindow(%p [%s], cmd=%d) from %s", h, cls, cmd, who);
     }
     return g_realShowWindow ? g_realShowWindow(h, cmd) : FALSE;
@@ -464,8 +467,10 @@ BOOL WINAPI Hook_SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, 
 {
     if (g_logOn)
     {
-        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax];
+        CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];
+        ClassOf(h, cls, sizeof(cls));
         Log("SetWindowPos(%p [%s], %d,%d %dx%d, flags=0x%X) from %s", h, cls, x, y, cx, cy, flags, who);
     }
     return g_realSetWindowPos ? g_realSetWindowPos(h, after, x, y, cx, cy, flags) : FALSE;
@@ -475,8 +480,10 @@ LRESULT WINAPI Hook_SendMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     if (m == WM_IME_NOTIFY && g_logOn)
     {
-        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax];
+        CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];
+        ClassOf(h, cls, sizeof(cls));
         Log("SendMessage(%p [%s], WM_IME_NOTIFY, wp=%u) from %s", h, cls, (unsigned)wp, who);
     }
     return g_realSendMessageW ? g_realSendMessageW(h, m, wp, lp) : 0;
@@ -486,8 +493,10 @@ BOOL WINAPI Hook_PostMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     if (m == WM_IME_NOTIFY && g_logOn)
     {
-        char who[kCallerTagMax]; CallerTagOf(_ReturnAddress(), who, sizeof(who));
-        char cls[kClassNameMax];  ClassOf(h, cls, sizeof(cls));
+        char who[kCallerTagMax];
+        CallerTagOf(_ReturnAddress(), who, sizeof(who));
+        char cls[kClassNameMax];
+        ClassOf(h, cls, sizeof(cls));
         Log("PostMessage(%p [%s], WM_IME_NOTIFY, wp=%u) from %s", h, cls, (unsigned)wp, who);
     }
     return g_realPostMessageW ? g_realPostMessageW(h, m, wp, lp) : FALSE;
@@ -500,8 +509,7 @@ void PatchApiIAT(const wchar_t* modName, const wchar_t* dll, const char* fn, voi
     if (!m || !d) return;
     void* real = (void*)::GetProcAddress(d, fn);
     if (!real) return;
-    if (const int n = PatchIAT(m, real, hook); n)
-        Log("PatchApiIAT %ws!%s = %d", modName, fn, n);
+    if (const int n = PatchIAT(m, real, hook); n) Log("PatchApiIAT %ws!%s = %d", modName, fn, n);
 }
 
 // ------------------------------------------------------------------ IAT 补丁
@@ -536,15 +544,18 @@ int PatchIAT(HMODULE mod, void* target, void* repl)
         }
         return n;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
 }
 
 void PatchOne(const wchar_t* name)
 {
     HMODULE m = ::GetModuleHandleW(name);
     if (!m) return;
-    HMODULE u32 = ::GetModuleHandleW(L"user32.dll");
-    void* real = u32 ? (void*)::GetProcAddress(u32, "GetGUIThreadInfo") : nullptr;
+    HMODULE u32  = ::GetModuleHandleW(L"user32.dll");
+    void*   real = u32 ? (void*)::GetProcAddress(u32, "GetGUIThreadInfo") : nullptr;
     if (!real) return;
     const int n = PatchIAT(m, real, (void*)&Hook_GetGUIThreadInfo);
     Log("PatchOne %ws base=%p -> %d", name, m, n);
@@ -560,7 +571,11 @@ void PatchOne(const wchar_t* name)
 void PatchCandFilter()
 {
     HMODULE m = ::GetModuleHandleW(L"QQPinyinTSF.dll");
-    if (!m) { Log("PatchCandFilter: shell not loaded"); return; }
+    if (!m)
+    {
+        Log("PatchCandFilter: shell not loaded");
+        return;
+    }
 
     BYTE* p = (BYTE*)m + kCandFilterFilterRva;
 
@@ -568,8 +583,7 @@ void PatchCandFilter()
     for (size_t i = 0; i < sizeof(kCandFilterOriginal); ++i)
     {
         if (p[i] == kCandFilterOriginal[i]) continue;
-        Log("PatchCandFilter: byte %zu is %02X, expected %02X - NOT patched",
-            i, p[i], kCandFilterOriginal[i]);
+        Log("PatchCandFilter: byte %zu is %02X, expected %02X - NOT patched", i, p[i], kCandFilterOriginal[i]);
         return;
     }
 
@@ -583,20 +597,20 @@ void PatchCandFilter()
         p[i] = kCandFilterPatch[i];
     ::VirtualProtect(p, kCandFilterPatchSize, old, &old);
     ::FlushInstructionCache(::GetCurrentProcess(), p, kCandFilterPatchSize);
-    Log("PatchCandFilter: APPLIED at %p -> %02X %02X (jump to return-zero)",
-        p, kCandFilterPatch[0], kCandFilterPatch[1]);
+    Log("PatchCandFilter: APPLIED at %p -> %02X %02X (jump to return-zero)", p, kCandFilterPatch[0],
+        kCandFilterPatch[1]);
 }
 
 DWORD WINAPI EngineWatcher(LPVOID)
 {
-    for (int i = 0; i < kEngineWaitIterations; ++i)   // 引擎是外壳稍后 LoadLibraryW 进来的，等它出现
+    for (int i = 0; i < kEngineWaitIterations; ++i)  // 引擎是外壳稍后 LoadLibraryW 进来的，等它出现
     {
         if (::GetModuleHandleW(L"QQPinyin.ime"))
         {
             PatchOne(L"QQPinyin.ime");
             PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "SendMessageW", (void*)&Hook_SendMessageW);
             PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "PostMessageW", (void*)&Hook_PostMessageW);
-            PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "ShowWindow",   (void*)&Hook_ShowWindow);
+            PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "ShowWindow", (void*)&Hook_ShowWindow);
             PatchApiIAT(L"QQPinyin.ime", L"user32.dll", "SetWindowPos", (void*)&Hook_SetWindowPos);
             break;
         }
@@ -610,14 +624,14 @@ HMODULE EnsureReal()
 {
     if (g_real) return g_real;
 
-    ReloadIni(true);                                  // 确定 real / hosts / mode / log
+    ReloadIni(true);  // 确定 real / hosts / mode / log
     const std::wstring realPath = RealPathCopy();
-    const bool match = HostMatches();
+    const bool         match    = HostMatches();
 
     g_real = ::LoadLibraryW(realPath.c_str());
-    Log("EnsureReal host_match=%d mode=%ld log=%ld real=%p path=%ws",
-        (int)match, g_mode, g_logOn, g_real, realPath.c_str());
-    if (!g_real || !match) return g_real;             // 不在名单里的宿主：只转发，什么都不改
+    Log("EnsureReal host_match=%d mode=%ld log=%ld real=%p path=%ws", (int)match, g_mode, g_logOn, g_real,
+        realPath.c_str());
+    if (!g_real || !match) return g_real;  // 不在名单里的宿主：只转发，什么都不改
 
     HMODULE u32 = ::GetModuleHandleW(L"user32.dll");
     if (u32)
@@ -649,7 +663,7 @@ void* RealProc(const char* name)
     return m ? (void*)::GetProcAddress(m, name) : nullptr;
 }
 
-} // namespace
+}  // namespace
 
 // ------------------------------------------------------------------ 导出（与真身一一对应）
 extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)

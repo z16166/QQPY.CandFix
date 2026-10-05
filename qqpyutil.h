@@ -12,7 +12,8 @@
 #include <windows.h>
 #include <string>
 
-namespace qqpy {
+namespace qqpy
+{
 
 // 临界区自旋次数：稍大一点可减少上下文切换
 constexpr DWORD kCriticalSectionSpinCount = 4000;
@@ -28,21 +29,31 @@ public:
 
     ~UniqueHandle() { reset(); }
 
-    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle(const UniqueHandle&)            = delete;
     UniqueHandle& operator=(const UniqueHandle&) = delete;
 
     UniqueHandle(UniqueHandle&& other) noexcept : m_h(other.m_h) { other.m_h = nullptr; }
     UniqueHandle& operator=(UniqueHandle&& other) noexcept
     {
-        if (this != &other) { reset(); m_h = other.m_h; other.m_h = nullptr; }
+        if (this != &other)
+        {
+            reset();
+            m_h       = other.m_h;
+            other.m_h = nullptr;
+        }
         return *this;
     }
 
-    HANDLE get() const noexcept { return m_h; }
-    bool valid() const noexcept { return m_h != nullptr && m_h != INVALID_HANDLE_VALUE; }
+    HANDLE   get() const noexcept { return m_h; }
+    bool     valid() const noexcept { return m_h != nullptr && m_h != INVALID_HANDLE_VALUE; }
     explicit operator bool() const noexcept { return valid(); }
 
-    HANDLE release() noexcept { HANDLE h = m_h; m_h = nullptr; return h; }
+    HANDLE release() noexcept
+    {
+        HANDLE h = m_h;
+        m_h      = nullptr;
+        return h;
+    }
 
     void reset(HANDLE h = nullptr) noexcept
     {
@@ -61,7 +72,7 @@ public:
     CriticalSection() noexcept { InitializeCriticalSectionAndSpinCount(&m_cs, kCriticalSectionSpinCount); }
     ~CriticalSection() { DeleteCriticalSection(&m_cs); }
 
-    CriticalSection(const CriticalSection&) = delete;
+    CriticalSection(const CriticalSection&)            = delete;
     CriticalSection& operator=(const CriticalSection&) = delete;
 
     void Enter() noexcept { EnterCriticalSection(&m_cs); }
@@ -78,7 +89,7 @@ public:
     explicit CsLock(CriticalSection& cs) noexcept : m_cs(cs) { m_cs.Enter(); }
     ~CsLock() { m_cs.Leave(); }
 
-    CsLock(const CsLock&) = delete;
+    CsLock(const CsLock&)            = delete;
     CsLock& operator=(const CsLock&) = delete;
 
 private:
@@ -92,7 +103,7 @@ public:
     UniqueTimer() noexcept = default;
     ~UniqueTimer() { reset(); }
 
-    UniqueTimer(const UniqueTimer&) = delete;
+    UniqueTimer(const UniqueTimer&)            = delete;
     UniqueTimer& operator=(const UniqueTimer&) = delete;
 
     bool start(UINT elapseMs, TIMERPROC proc) noexcept
@@ -123,4 +134,4 @@ std::wstring IniPath();             // <ConfigDir>\qqpyproxy.ini
 std::wstring LogPath();             // <ConfigDir>\qqpyproxy.log
 std::wstring DefaultRealDllPath();  // <SystemDir>\IME\QQPinyinTSF\QQPinyinTSF.dll（GetSystemDirectoryW）
 
-} // namespace qqpy
+}  // namespace qqpy

@@ -18,16 +18,17 @@
 #pragma comment(lib, "uuid.lib")
 
 // ------------------------------------------------------------------ 常量
-constexpr const wchar_t* kSubDirName         = L"QQPYCandFix";                          // 退路目录名
+constexpr const wchar_t* kSubDirName         = L"QQPYCandFix";  // 退路目录名
 constexpr const wchar_t* kIniFileName        = L"qqpyproxy.ini";
 constexpr const wchar_t* kLogFileName        = L"qqpyproxy.log";
 constexpr const wchar_t* kImeRelativePath    = L"\\IME\\QQPinyinTSF\\QQPinyinTSF.dll";  // 相对 GetSystemDirectoryW()
-constexpr const wchar_t* kSystem32Relative   = L"\\system32";                            // 仅当 GetSystemDirectoryW 失败时用
+constexpr const wchar_t* kSystem32Relative   = L"\\system32";  // 仅当 GetSystemDirectoryW 失败时用
 constexpr const wchar_t* kEnvProgramData     = L"ProgramData";
 constexpr const wchar_t* kEnvAllUsersProfile = L"ALLUSERSPROFILE";
 constexpr const wchar_t* kEnvSystemRoot      = L"SystemRoot";
 
-namespace {
+namespace
+{
 
 // 取本 DLL 的模块句柄：用本文件里的函数地址反查，永远正确，无需全局变量
 HMODULE SelfModule() noexcept
@@ -47,52 +48,47 @@ void TrimTrailingSeparators(std::wstring& s)
 // 环境变量退路
 std::wstring EnvDir(const wchar_t* name)
 {
-    wchar_t buf[MAX_PATH] = {};
-    const DWORD n = ::GetEnvironmentVariableW(name, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH)
-        return std::wstring();
+    wchar_t     buf[MAX_PATH] = {};
+    const DWORD n             = ::GetEnvironmentVariableW(name, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
     std::wstring s(buf, n);
     TrimTrailingSeparators(s);
     return s;
 }
 
-} // namespace
+}  // namespace
 
-namespace qqpy {
+namespace qqpy
+{
 
 std::wstring DllDirectory()
 {
-    wchar_t buf[MAX_PATH] = {};
-    const DWORD n = ::GetModuleFileNameW(SelfModule(), buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH)
-        return std::wstring();
+    wchar_t     buf[MAX_PATH] = {};
+    const DWORD n             = ::GetModuleFileNameW(SelfModule(), buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
 
     std::wstring path(buf, n);
     const size_t pos = path.find_last_of(L"\\/");
-    if (pos == std::wstring::npos)
-        return std::wstring();
+    if (pos == std::wstring::npos) return std::wstring();
     return path.substr(0, pos);
 }
 
 std::wstring ConfigDir()
 {
     // 1) 部署时 ini / log 与 DLL 同目录 —— 最稳，且不需要任何系统 API
-    if (std::wstring dir = DllDirectory(); !dir.empty())
-        return dir;
+    if (std::wstring dir = DllDirectory(); !dir.empty()) return dir;
 
     // 2) shell folder API（RAII 管理 CoTaskMemAlloc 出来的缓冲）
     PWSTR programData = nullptr;
     if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &programData)) && programData)
     {
-        ATL::CComHeapPtr<WCHAR> hold(programData);   // 析构即 CoTaskMemFree
+        ATL::CComHeapPtr<WCHAR> hold(programData);  // 析构即 CoTaskMemFree
         return std::wstring(programData) + L"\\" + kSubDirName;
     }
 
     // 3) 环境变量
-    if (std::wstring dir = EnvDir(kEnvProgramData); !dir.empty())
-        return dir + L"\\" + kSubDirName;
-    if (std::wstring dir = EnvDir(kEnvAllUsersProfile); !dir.empty())
-        return dir + L"\\" + kSubDirName;
+    if (std::wstring dir = EnvDir(kEnvProgramData); !dir.empty()) return dir + L"\\" + kSubDirName;
+    if (std::wstring dir = EnvDir(kEnvAllUsersProfile); !dir.empty()) return dir + L"\\" + kSubDirName;
 
     return std::wstring();
 }
@@ -111,23 +107,19 @@ std::wstring LogPath()
 
 std::wstring DefaultRealDllPath()
 {
-    wchar_t sys[MAX_PATH] = {};
-    UINT n = ::GetSystemDirectoryW(sys, MAX_PATH);
+    wchar_t      sys[MAX_PATH] = {};
+    UINT         n             = ::GetSystemDirectoryW(sys, MAX_PATH);
     std::wstring dir;
-    if (n > 0 && n < MAX_PATH)
-    {
-        dir.assign(sys, n);
-    }
+    if (n > 0 && n < MAX_PATH) { dir.assign(sys, n); }
     else
     {
         // 退路：环境变量拼 system32
         const std::wstring root = EnvDir(kEnvSystemRoot);
-        if (root.empty())
-            return std::wstring();
+        if (root.empty()) return std::wstring();
         dir = root + kSystem32Relative;
     }
     TrimTrailingSeparators(dir);
     return dir + kImeRelativePath;
 }
 
-} // namespace qqpy
+}  // namespace qqpy

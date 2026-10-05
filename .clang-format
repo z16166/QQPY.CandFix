@@ -1,0 +1,32 @@
+---
+# QQPY.CandFix 代码风格
+#
+# 与现有代码保持一致：Allman 大括号、4 空格缩进、指针/引用符号左置。
+# SortIncludes 必须保持 false：<windows.h> 必须在 <atlbase.h> / <msctf.h> 之前，
+# 否则 combaseapi.h 会先声明 DllGetClassObject（C2375 different linkage）。
+Language: Cpp
+BasedOnStyle: Microsoft
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+BreakBeforeBraces: Allman
+AccessModifierOffset: -4    # public:/private: 与 class 的 { 对齐（顶格）
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortBlocksOnASingleLine: Always
+AllowShortLoopsOnASingleLine: false
+
+SortIncludes: false
+IncludeBlocks: Preserve
+
+SpacesBeforeTrailingComments: 2
+MaxEmptyLinesToKeep: 1

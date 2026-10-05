@@ -42,39 +42,44 @@ constexpr LONG   kFirstNSessionLogs          = 6;     // 前 N 次会话写日�
 constexpr LONG   kLogEveryNSessions          = 500;   // 之后每 N 次写一条
 constexpr LONG   kFirstNRequestLogs          = 6;     // 前 N 次请求写日志
 constexpr size_t kLogLineMax                 = 512;
-constexpr ULONG  kSelectionCount             = 1;     // 只要"当前选区"这一项
+constexpr ULONG  kSelectionCount             = 1;  // 只要"当前选区"这一项
 
-namespace {
+namespace
+{
 
 CComPtr<ITfThreadMgr> g_ptm;          // 本线程的 TSF 线程管理器（RAII）
-TfClientId    g_tid = 0;              // 本线程的 TSF client id
-RECT          g_rc = {0, 0, 0, 0};
-volatile LONG g_rcValid = 0;
-volatile LONG g_rcTick = 0;
-volatile LONG g_lastReq = 0;
-volatile LONG g_req = 0;
-volatile LONG g_sess = 0;
-void        (*g_log)(const char*) = nullptr;
-qqpy::UniqueTimer g_timer;            // 定时器（RAII）
+TfClientId            g_tid     = 0;  // 本线程的 TSF client id
+RECT                  g_rc      = {0, 0, 0, 0};
+volatile LONG         g_rcValid = 0;
+volatile LONG         g_rcTick  = 0;
+volatile LONG         g_lastReq = 0;
+volatile LONG         g_req     = 0;
+volatile LONG         g_sess    = 0;
+void (*g_log)(const char*)      = nullptr;
+qqpy::UniqueTimer g_timer;  // 定时器（RAII）
 
 void Lf(const char* fmt, ...)
 {
     if (!g_log) return;
-    char buf[kLogLineMax];
-    va_list ap; va_start(ap, fmt);
+    char    buf[kLogLineMax];
+    va_list ap;
+    va_start(ap, fmt);
     wvsprintfA(buf, fmt, ap);
     va_end(ap);
     g_log(buf);
 }
 
-void L(const char* s) { if (g_log) g_log(s); }
+void L(const char* s)
+{
+    if (g_log) g_log(s);
+}
 
 // 只读编辑会话：在 TSF 给的 edit cookie 下问宿主"光标在哪一格"
 class CExtentSession : public CComObjectRootEx<CComSingleThreadModel>, public ITfEditSession
 {
 public:
     BEGIN_COM_MAP(CExtentSession)
-        COM_INTERFACE_ENTRY(ITfEditSession)
+    COM_INTERFACE_ENTRY(ITfEditSession)
     END_COM_MAP()
 
     HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie ec) override
@@ -84,10 +89,10 @@ public:
         CComPtr<ITfContextView> pview;
         CComPtr<ITfRange>       range;
 
-        HRESULT h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL, h4 = E_FAIL, h5 = E_FAIL;
-        RECT rc = {0, 0, 0, 0};
-        BOOL clipped = FALSE;
-        const LONG n = InterlockedIncrement(&g_sess);
+        HRESULT    h1 = E_FAIL, h2 = E_FAIL, h3 = E_FAIL, h4 = E_FAIL, h5 = E_FAIL;
+        RECT       rc      = {0, 0, 0, 0};
+        BOOL       clipped = FALSE;
+        const LONG n       = InterlockedIncrement(&g_sess);
 
         if (g_ptm) h1 = g_ptm->GetFocus(&pdim);
         if (SUCCEEDED(h1) && pdim) h2 = pdim->GetTop(&pic);
@@ -97,27 +102,27 @@ public:
             if (SUCCEEDED(h3) && pview)
             {
                 // GetTextExt 的 pRange 不能为 NULL，先取当前选区；失败则退到文档起点
-                TF_SELECTION sel = {};
-                ULONG nsel = 0;
-                h5 = pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &nsel);
+                TF_SELECTION sel  = {};
+                ULONG        nsel = 0;
+                h5                = pic->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &sel, &nsel);
                 if (SUCCEEDED(h5) && nsel == 1 && sel.range)
-                    range.Attach(sel.range);            // 接管 GetSelection 给出的引用，RAII 释放
+                    range.Attach(sel.range);  // 接管 GetSelection 给出的引用，RAII 释放
                 else if (SUCCEEDED(pic->GetStart(ec, &range)) && range)
                     h5 = S_OK;
 
-                if (range)
-                    h4 = pview->GetTextExt(ec, range, &rc, &clipped);
+                if (range) h4 = pview->GetTextExt(ec, range, &rc, &clipped);
             }
         }
 
         if (n <= kFirstNSessionLogs || (n % kLogEveryNSessions) == 0)
-            Lf("TsfSession#%ld GetFocus=%08X GetTop=%08X GetView=%08X GetRange=%08X GetTextExt=%08X rc=(%d,%d-%d,%d) clipped=%d",
-               n, (unsigned)h1, (unsigned)h2, (unsigned)h3, (unsigned)h5, (unsigned)h4,
-               rc.left, rc.top, rc.right, rc.bottom, (int)clipped);
+            Lf("TsfSession#%ld GetFocus=%08X GetTop=%08X GetView=%08X GetRange=%08X GetTextExt=%08X rc=(%d,%d-%d,%d) "
+               "clipped=%d",
+               n, (unsigned)h1, (unsigned)h2, (unsigned)h3, (unsigned)h5, (unsigned)h4, rc.left, rc.top, rc.right,
+               rc.bottom, (int)clipped);
 
         if (SUCCEEDED(h4) && rc.right > rc.left && rc.bottom > rc.top)
         {
-            g_rc = rc;
+            g_rc     = rc;
             g_rcTick = (LONG)GetTickCount();
             InterlockedExchange(&g_rcValid, 1);
         }
@@ -128,9 +133,9 @@ public:
 void TsfRequest()
 {
     if (!g_ptm) return;
-    const DWORD now = GetTickCount();
-    LONG prev = g_lastReq;
-    if (now - (DWORD)prev < kExtentRequestMinIntervalMs) return;   // 限流
+    const DWORD now  = GetTickCount();
+    LONG        prev = g_lastReq;
+    if (now - (DWORD)prev < kExtentRequestMinIntervalMs) return;  // 限流
     if (InterlockedCompareExchange(&g_lastReq, (LONG)now, prev) != prev) return;
 
     CComPtr<ITfDocumentMgr> pdim;
@@ -147,25 +152,25 @@ void TsfRequest()
     CComQIPtr<ITfEditSession> session(raw);
     if (!session) return;
 
-    HRESULT phr = S_OK;
-    const HRESULT hreq = pic->RequestEditSession(g_tid, session, TF_ES_READ, &phr);   // 异步只读
-    const LONG k = InterlockedIncrement(&g_req);
+    HRESULT       phr  = S_OK;
+    const HRESULT hreq = pic->RequestEditSession(g_tid, session, TF_ES_READ, &phr);  // 异步只读
+    const LONG    k    = InterlockedIncrement(&g_req);
     if (k <= kFirstNRequestLogs)
         Lf("TsfRequest#%ld RequestEditSession h=%08X phr=%08X", k, (unsigned)hreq, (unsigned)phr);
 }
 
-VOID CALLBACK TsfTimer(HWND, UINT, UINT_PTR, DWORD) { TsfRequest(); }
+VOID CALLBACK TsfTimer(HWND, UINT, UINT_PTR, DWORD)
+{ TsfRequest(); }
 
-} // namespace
+}  // namespace
 
 extern "C" void TsfInit(void (*logfn)(const char* msg))
 {
     g_log = logfn;
     if (g_ptm) return;
 
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // 宿主已初始化过，这里只是引用计数 +1
-    if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&g_ptm))) || !g_ptm)
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // 宿主已初始化过，这里只是引用计数 +1
+    if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_ptm))) || !g_ptm)
     {
         L("TsfInit: CoCreateInstance(CLSID_TF_ThreadMgr) FAILED");
         g_ptm.Release();
@@ -173,8 +178,8 @@ extern "C" void TsfInit(void (*logfn)(const char* msg))
     }
 
     // ITfThreadMgr 没有 CreateClientId；Activate 返回本线程的 client id
-    TfClientId tid = 0;
-    const HRESULT ha = g_ptm->Activate(&tid);
+    TfClientId    tid = 0;
+    const HRESULT ha  = g_ptm->Activate(&tid);
     if (SUCCEEDED(ha) && tid)
     {
         g_tid = tid;
@@ -185,7 +190,7 @@ extern "C" void TsfInit(void (*logfn)(const char* msg))
         Lf("TsfInit: Activate h=%08X tid=%u FAILED", (unsigned)ha, (unsigned)tid);
     }
 
-    if (g_timer.start(kExtentRefreshIntervalMs, TsfTimer))   // RAII：定时刷新
+    if (g_timer.start(kExtentRefreshIntervalMs, TsfTimer))  // RAII：定时刷新
         TsfRequest();
     else
         L("TsfInit: SetTimer FAILED");
